@@ -8,12 +8,14 @@ import DeliveredReceiverStep from "@/components/tripsteps/DeliveredReceiverStep"
 import DestinationArrivalStep from "@/components/tripsteps/DestinationArrivalStep";
 import LoadedShipperStep from "@/components/tripsteps/LoadedShipperStep";
 import StepTimeline from "@/components/tripsteps/StepTimeline";
+import StopActionCard from "@/components/tripsteps/StopActionCard";
 import TripCard from "@/components/tripsteps/TripCard";
 import { TripStep, TripStepId } from "@/components/tripsteps/types";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useJourney } from "@/hooks/useJourney";
 import { useLocationTracking } from "@/hooks/useLocationTracking";
 import { useShipments } from "@/hooks/useShipments";
+import { useStopProgress } from "@/hooks/useStopProgress";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import BottomSheet, { BottomSheetScrollView } from "@gorhom/bottom-sheet";
 import {
@@ -33,7 +35,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { equipmentVerificationDone } from "../trip/equipment-verification";
+import { isEquipmentVerifiedLocally } from "../trip/equipment-verification";
 
 const STEPS_CONFIG: Omit<TripStep, "status">[] = [
   {
@@ -89,12 +91,34 @@ export default function TripScreen() {
   const {
     activeIndex,
     journey,
+    equipmentVerified: serverEquipmentVerified,
     loading: journeyLoading,
     refresh: refreshJourney,
   } = useJourney(shipment?.uuid);
 
+  /*
+   * The stop-by-stop journey. This is the real state now — the five-step
+   * timeline above is a summary of it, kept because the visual is useful on a
+   * two-stop run.
+   */
+  const {
+    stops: progressStops,
+    loading: progressLoading,
+    refresh: refreshProgress,
+    apply: applyProgress,
+  } = useStopProgress(shipment?.uuid);
+
+  /*
+   * The server is the authority here — it refuses to start the journey without
+   * the photos, so anything the app believes on its own can only be wrong. The
+   * local echo is consulted so the UI advances immediately after an upload,
+   * before the next journey refresh lands, and it is scoped to this shipment so
+   * one verified load cannot vouch for the next one.
+   */
   const equipmentVerified =
-    !!journey?.shipper_arrived_at || equipmentVerificationDone;
+    serverEquipmentVerified ||
+    !!journey?.shipper_arrived_at ||
+    isEquipmentVerifiedLocally(shipment?.uuid);
 
   //   const { isTracking, startTracking, stopTracking } = useLocationTracking();
 
@@ -121,8 +145,20 @@ export default function TripScreen() {
       }
     : undefined;
 
-  const ROUTE: TripWaypoint[] =
-    ORIGIN && DESTINATION ? [ORIGIN, DESTINATION] : [];
+  /*
+   * The line on the map follows every stop in order, not just the first and the
+   * last — on a four-stop run, drawing Detroit straight to Chicago would show a
+   * route the driver is not taking.
+   */
+  const ROUTE: TripWaypoint[] = (shipment?.stops ?? [])
+    .slice()
+    .sort((a, b) => a.stop_number - b.stop_number)
+    .filter((s) => s.latitude && s.longitude)
+    .map((s) => ({
+      latitude: parseFloat(s.latitude),
+      longitude: parseFloat(s.longitude),
+      title: `${s.city ?? ""}, ${s.state ?? ""}`,
+    }));
 
   const isJourneyCompleted = activeIndex >= 5;
 
@@ -290,330 +326,341 @@ export default function TripScreen() {
         </View>
       </Modal>
 
-      <BottomSheet
-        ref={bottomSheetRef}
-        index={1}
-        snapPoints={snapPoints}
-        enableContentPanningGesture
-        enableHandlePanningGesture
-        enablePanDownToClose={false}
-        backgroundStyle={{
-          backgroundColor: "transparent",
-          borderTopLeftRadius: 24,
-          borderTopRightRadius: 24,
-        }}
-      >
-        <BottomSheetScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.sheetContent}
+      {/*
+        With no load assigned there is no journey to act on — the sheet would
+        only show placeholder stops and an ETA for a trip that does not exist,
+        so the screen stays a plain map until dispatch assigns one.
+      */}
+      {shipment && (
+        <BottomSheet
+          ref={bottomSheetRef}
+          index={1}
+          snapPoints={snapPoints}
+          enableContentPanningGesture
+          enableHandlePanningGesture
+          enablePanDownToClose={false}
+          backgroundStyle={{
+            backgroundColor: "transparent",
+            borderTopLeftRadius: 24,
+            borderTopRightRadius: 24,
+          }}
         >
-          {ORIGIN && DESTINATION && (
-            <TripCard origin={ORIGIN} destination={DESTINATION} />
-          )}
-          <View
-            style={{
-              backgroundColor: theme.background,
-              paddingBottom: 120,
-              marginTop: 20,
-              borderTopLeftRadius: 24,
-              borderTopRightRadius: 24,
-            }}
+          <BottomSheetScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.sheetContent}
           >
+            {ORIGIN && DESTINATION && (
+              <TripCard origin={ORIGIN} destination={DESTINATION} />
+            )}
             <View
               style={{
-                backgroundColor: theme.card,
-                borderRadius: 20,
-                margin: 16,
-                paddingBottom: 10,
+                backgroundColor: theme.background,
+                paddingBottom: 120,
+                marginTop: 20,
+                borderTopLeftRadius: 24,
+                borderTopRightRadius: 24,
               }}
             >
               <View
                 style={{
-                  padding: 16,
-                  flexDirection: "row",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <AppText
-                  variant="h3"
-                  style={{
-                    color: theme.text,
-                  }}
-                >
-                  {deliveryStop
-                    ? `${deliveryStop.city}, ${deliveryStop.state}`
-                    : "—"}
-                </AppText>
-                <AppText
-                  variant="tiny"
-                  style={{
-                    color: theme.secondaryText,
-                  }}
-                >
-                  {deliveryStop?.stop_name ?? ""}
-                </AppText>
-              </View>
-              <View
-                style={{
-                  flexDirection: "row",
-
-                  justifyContent: "space-around",
+                  backgroundColor: theme.card,
+                  borderRadius: 20,
+                  margin: 16,
+                  paddingBottom: 10,
                 }}
               >
                 <View
                   style={{
-                    flexDirection: "column",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  <AppText
-                    variant="tiny"
-                    style={{
-                      color: theme.text,
-                    }}
-                  >
-                    REMAINING
-                  </AppText>
-                  <AppText
-                    variant="caption"
-                    style={{
-                      color: theme.secondaryText,
-                    }}
-                  >
-                    412 min.
-                  </AppText>
-                </View>
-                <View
-                  style={{
-                    width: 1,
-                    height: 40,
-                    backgroundColor: theme.secondaryText,
-                  }}
-                />
-                <View
-                  style={{
-                    flexDirection: "column",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  <AppText
-                    variant="tiny"
-                    style={{
-                      color: theme.text,
-                    }}
-                  >
-                    ARRIVAL ETA
-                  </AppText>
-
-                  <AppText
-                    variant="caption"
-                    style={{
-                      color: theme.secondaryText,
-                    }}
-                  >
-                    09:40 AM
-                  </AppText>
-                </View>
-                <View
-                  style={{
-                    width: 1,
-                    height: 40,
-                    backgroundColor: theme.secondaryText,
-                  }}
-                />
-
-                <View
-                  style={{
+                    padding: 16,
                     flexDirection: "row",
+                    justifyContent: "space-between",
                     alignItems: "center",
-                    gap: 6,
-                    borderWidth: 1,
-                    borderColor: "#4CAF50",
-                    borderRadius: 20,
-                    paddingHorizontal: 5,
                   }}
                 >
-                  <MaterialCommunityIcons
-                    name="check-decagram-outline"
-                    size={16}
-                    color="#4CAF50"
-                  />
-                  <AppText
-                    variant="tiny"
-                    style={{
-                      color: "#4CAF50",
-                    }}
-                  >
-                    ON TIME
-                  </AppText>
-                </View>
-              </View>
-              <View style={styles.sectionHeader}>
-                <View style={styles.sectionLabelRow}>
-                  <AppText
-                    variant="label"
-                    style={{
-                      color: theme.secondaryText,
-                    }}
-                  >
-                    SHIPMENT JOURNEY
-                  </AppText>
-                </View>
-              </View>
-              <StepTimeline steps={steps} activeIndex={currentIndex} />
-
-              {isJourneyCompleted ? (
-                <View
-                  style={{
-                    margin: 16,
-                    borderRadius: 16,
-                    backgroundColor: "#F0FDF4",
-                    borderWidth: 1.5,
-                    borderColor: "#16A34A",
-                    padding: 20,
-                    alignItems: "center",
-                    gap: 10,
-                  }}
-                >
-                  <View
-                    style={{
-                      width: 64,
-                      height: 64,
-                      borderRadius: 32,
-                      backgroundColor: "#16A34A",
-                      justifyContent: "center",
-                      alignItems: "center",
-                      marginBottom: 4,
-                    }}
-                  >
-                    <MaterialCommunityIcons
-                      name="check-bold"
-                      size={32}
-                      color="#fff"
-                    />
-                  </View>
                   <AppText
                     variant="h3"
                     style={{
-                      color: "#15803D",
-                      fontWeight: "800",
-                      textAlign: "center",
+                      color: theme.text,
                     }}
                   >
-                    Trip Completed!
+                    {deliveryStop
+                      ? `${deliveryStop.city}, ${deliveryStop.state}`
+                      : "—"}
                   </AppText>
                   <AppText
-                    variant="caption"
+                    variant="tiny"
                     style={{
-                      color: "#166534",
-                      textAlign: "center",
-                      lineHeight: 20,
+                      color: theme.secondaryText,
                     }}
                   >
-                    All steps have been successfully completed. This load has
-                    been delivered.
+                    {deliveryStop?.stop_name ?? ""}
                   </AppText>
+                </View>
+                <View
+                  style={{
+                    flexDirection: "row",
+
+                    justifyContent: "space-around",
+                  }}
+                >
+                  <View
+                    style={{
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <AppText
+                      variant="tiny"
+                      style={{
+                        color: theme.text,
+                      }}
+                    >
+                      REMAINING
+                    </AppText>
+                    <AppText
+                      variant="caption"
+                      style={{
+                        color: theme.secondaryText,
+                      }}
+                    >
+                      412 min.
+                    </AppText>
+                  </View>
+                  <View
+                    style={{
+                      width: 1,
+                      height: 40,
+                      backgroundColor: theme.secondaryText,
+                    }}
+                  />
+                  <View
+                    style={{
+                      flexDirection: "column",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <AppText
+                      variant="tiny"
+                      style={{
+                        color: theme.text,
+                      }}
+                    >
+                      ARRIVAL ETA
+                    </AppText>
+
+                    <AppText
+                      variant="caption"
+                      style={{
+                        color: theme.secondaryText,
+                      }}
+                    >
+                      09:40 AM
+                    </AppText>
+                  </View>
+                  <View
+                    style={{
+                      width: 1,
+                      height: 40,
+                      backgroundColor: theme.secondaryText,
+                    }}
+                  />
+
                   <View
                     style={{
                       flexDirection: "row",
-                      gap: 16,
-                      marginTop: 4,
-                      width: "100%",
-                      justifyContent: "space-around",
+                      alignItems: "center",
+                      gap: 6,
+                      borderWidth: 1,
+                      borderColor: "#4CAF50",
+                      borderRadius: 20,
+                      paddingHorizontal: 5,
                     }}
                   >
-                    <View style={{ alignItems: "center", gap: 2 }}>
-                      <MaterialCommunityIcons
-                        name="shield-check"
-                        size={18}
-                        color="#16A34A"
-                      />
-                      <AppText
-                        variant="tiny"
-                        style={{ color: "#15803D", fontWeight: "600" }}
-                      >
-                        Verified
-                      </AppText>
-                    </View>
-                    <View style={{ alignItems: "center", gap: 2 }}>
-                      <MaterialCommunityIcons
-                        name="file-document-check"
-                        size={18}
-                        color="#16A34A"
-                      />
-                      <AppText
-                        variant="tiny"
-                        style={{ color: "#15803D", fontWeight: "600" }}
-                      >
-                        POD Saved
-                      </AppText>
-                    </View>
-                    <View style={{ alignItems: "center", gap: 2 }}>
-                      <MaterialCommunityIcons
-                        name="truck-check"
-                        size={18}
-                        color="#16A34A"
-                      />
-                      <AppText
-                        variant="tiny"
-                        style={{ color: "#15803D", fontWeight: "600" }}
-                      >
-                        Delivered
-                      </AppText>
-                    </View>
+                    <MaterialCommunityIcons
+                      name="check-decagram-outline"
+                      size={16}
+                      color="#4CAF50"
+                    />
+                    <AppText
+                      variant="tiny"
+                      style={{
+                        color: "#4CAF50",
+                      }}
+                    >
+                      ON TIME
+                    </AppText>
                   </View>
                 </View>
-              ) : (
-                <>
-                  {activeStepId === "arrived_shipper" && (
-                    <ArrivedShipperStep
-                      onArrive={advance}
-                      distanceToOrigin={
-                        distToOrigin === Infinity ? 0 : distToOrigin
-                      }
-                      canArrive={canArriveAtShipper}
-                      equipmentVerified={equipmentVerified}
-                      shipmentUuid={shipment?.uuid}
-                    />
-                  )}
+                <View style={styles.sectionHeader}>
+                  <View style={styles.sectionLabelRow}>
+                    <AppText
+                      variant="label"
+                      style={{
+                        color: theme.secondaryText,
+                      }}
+                    >
+                      SHIPMENT JOURNEY
+                    </AppText>
+                  </View>
+                </View>
+                <StepTimeline steps={steps} activeIndex={currentIndex} />
 
-                  {activeStepId === "loaded_shipper" && (
-                    <LoadedShipperStep
-                      onComplete={advance}
-                      shipmentUuid={shipment?.uuid}
-                    />
-                  )}
+                {isJourneyCompleted ? (
+                  <View
+                    style={{
+                      margin: 16,
+                      borderRadius: 16,
+                      backgroundColor: "#F0FDF4",
+                      borderWidth: 1.5,
+                      borderColor: "#16A34A",
+                      padding: 20,
+                      alignItems: "center",
+                      gap: 10,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 64,
+                        height: 64,
+                        borderRadius: 32,
+                        backgroundColor: "#16A34A",
+                        justifyContent: "center",
+                        alignItems: "center",
+                        marginBottom: 4,
+                      }}
+                    >
+                      <MaterialCommunityIcons
+                        name="check-bold"
+                        size={32}
+                        color="#fff"
+                      />
+                    </View>
+                    <AppText
+                      variant="h3"
+                      style={{
+                        color: "#15803D",
+                        fontWeight: "800",
+                        textAlign: "center",
+                      }}
+                    >
+                      Trip Completed!
+                    </AppText>
+                    <AppText
+                      variant="caption"
+                      style={{
+                        color: "#166534",
+                        textAlign: "center",
+                        lineHeight: 20,
+                      }}
+                    >
+                      All steps have been successfully completed. This load has
+                      been delivered.
+                    </AppText>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        gap: 16,
+                        marginTop: 4,
+                        width: "100%",
+                        justifyContent: "space-around",
+                      }}
+                    >
+                      <View style={{ alignItems: "center", gap: 2 }}>
+                        <MaterialCommunityIcons
+                          name="shield-check"
+                          size={18}
+                          color="#16A34A"
+                        />
+                        <AppText
+                          variant="tiny"
+                          style={{ color: "#15803D", fontWeight: "600" }}
+                        >
+                          Verified
+                        </AppText>
+                      </View>
+                      <View style={{ alignItems: "center", gap: 2 }}>
+                        <MaterialCommunityIcons
+                          name="file-document-check"
+                          size={18}
+                          color="#16A34A"
+                        />
+                        <AppText
+                          variant="tiny"
+                          style={{ color: "#15803D", fontWeight: "600" }}
+                        >
+                          POD Saved
+                        </AppText>
+                      </View>
+                      <View style={{ alignItems: "center", gap: 2 }}>
+                        <MaterialCommunityIcons
+                          name="truck-check"
+                          size={18}
+                          color="#16A34A"
+                        />
+                        <AppText
+                          variant="tiny"
+                          style={{ color: "#15803D", fontWeight: "600" }}
+                        >
+                          Delivered
+                        </AppText>
+                      </View>
+                    </View>
+                  </View>
+                ) : (
+                  <>
+                    {/* Equipment gates the whole journey, so it is asked for
+                        before any stop is offered — the API refuses arrival
+                        without it. */}
+                    {!equipmentVerified ? (
+                      <ArrivedShipperStep
+                        onArrive={advance}
+                        distanceToOrigin={
+                          distToOrigin === Infinity ? 0 : distToOrigin
+                        }
+                        canArrive={canArriveAtShipper}
+                        equipmentVerified={equipmentVerified}
+                        shipmentUuid={shipment?.uuid}
+                      />
+                    ) : (
+                      <>
+                        {/*
+                          One card per stop, in order, generated from the load
+                          rather than from a fixed list of five. A two-stop run
+                          and a six-stop run render through the same code, and the
+                          stops in the middle are finally reachable.
+                        */}
+                        {progressLoading && progressStops.length === 0 && (
+                          <ActivityIndicator color={theme.primaryButton} />
+                        )}
 
-                  {activeStepId === "arrived_receiver" && (
-                    <ArrivedReceiverStep
-                      onArrive={advance}
-                      distanceToDestination={
-                        distToDest === Infinity ? 0 : distToDest
-                      }
-                      canArrive={canArriveAtReceiver}
-                      shipmentUuid={shipment?.uuid}
-                    />
-                  )}
-
-                  {activeStepId === "delivered_receiver" && (
-                    <DeliveredReceiverStep
-                      onComplete={advance}
-                      shipmentUuid={shipment?.uuid}
-                    />
-                  )}
-
-                  {activeStepId === "destination_arrival" && (
-                    <DestinationArrivalStep shipmentUuid={shipment?.uuid} />
-                  )}
-                </>
-              )}
+                        {progressStops.map((s) => (
+                          <StopActionCard
+                            key={s.stop_id}
+                            shipmentUuid={shipment!.uuid}
+                            stop={s}
+                            equipmentVerified={equipmentVerified}
+                            onAdvance={(next) => {
+                              if (next.length) applyProgress(next);
+                              else refreshProgress();
+                              refreshJourney();
+                            }}
+                            onRefresh={() => {
+                              refreshProgress();
+                              refreshJourney();
+                            }}
+                          />
+                        ))}
+                      </>
+                    )}
+                  </>
+                )}
+              </View>
             </View>
-          </View>
-        </BottomSheetScrollView>
-      </BottomSheet>
+          </BottomSheetScrollView>
+        </BottomSheet>
+      )}
 
       <LoadDrawer visible={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </View>

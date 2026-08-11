@@ -165,45 +165,38 @@ export interface OtpLoginPayload {
   contact: string;
   otp: string;
 }
+/*
+ * Mirrors DriverResource on the API. This used to describe the broker API's
+ * `drivers` table — row_id, active_plan, lifetime_loads, roles and a dozen more
+ * columns that `app_drivers` has never had — so most of it was always undefined
+ * at runtime and the fields that mattered were quietly lost on the way into
+ * SecureStore.
+ */
 export interface Driver {
   id: number;
-  row_id: string;
-  sub_users_of: string | null;
-  prefix: string;
+  uuid: string;
   name: string;
   first_name: string;
   last_name: string;
-  suffix: string;
   email: string;
-  profile_pic: string;
-  c_code: string | null;
-  contact: string;
-  last_login: string | null;
-  active_plan: string;
-  lifetime_loads: number;
-  consumed_loads: number;
-  subscription_id: string;
-  stripe_customer_id: string;
-  address: string;
-  city: string;
-  state: string;
-  state_id: string;
-  pincode: string;
-  country: string;
-  lead_id: string;
-  forgot_password_datetime: string | null;
-  users_of: string;
-  roles: string;
-  add_type: string;
-  send_invite: number;
-  added_on: string;
-  updated_on: string | null;
-  status: number;
+  contact: string | null;
+  profile_pic: string | null;
+  carrier_name: string | null;
+  company_id: number | null;
+  status: string;
   phone_verified: boolean;
-  carrier_name: string;
-  cdl_front_path: string;
-  cdl_back_path: string;
+  email_verified_at: string | null;
   liveness_verified: boolean;
+  liveness_status: "approved" | "in_review" | "declined" | "pending";
+  cdl_number: string | null;
+  cdl_state: string | null;
+  cdl_expiration: string | null;
+  dob: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  created_at: string;
 }
 export interface LoginResponse {
   status: string;
@@ -215,6 +208,14 @@ export interface AuthTokens {
   token: string;
   refreshToken?: string;
   driver: Driver;
+
+  /*
+   * Registration returns this. "in_review" means the account exists but Didit
+   * has not decided the identity check yet — the verdict reaches the backend by
+   * webhook, not by anything the app can wait on here.
+   */
+  liveness_status?: "approved" | "in_review" | "declined";
+  message?: string;
 }
 export interface SignupPayload {
   phone: string;
@@ -235,33 +236,33 @@ export interface VerifyOtpResponse {
   message: string;
   registration_token: string;
 }
+/*
+ * Mirrors what GET /driver/profile actually builds. The previous shape was the
+ * broker API's user record — designation, is_owner, two_factor_enabled, roles —
+ * so `profile.profile_image` and `profile.roles` were undefined at runtime and
+ * the avatar on the personal-info screen could never render.
+ */
 export interface DriverProfile {
   id: number;
-  uuid: string;
+  uuid: string | null;
   first_name: string;
   last_name: string;
+  profile_picture_url: string | null;
   email: string;
-  phone: string;
-  designation: string | null;
-  profile_image: string | null;
-  is_owner: number;
-  status: number;
-  email_verified_at: string | null;
+  phone: string | null;
+  status: string;
+  cdl_number: string | null;
+  cdl_state: string | null;
+  cdl_expiration: string | null;
+  cdl_front_image: string | null;
+  cdl_back_image: string | null;
+  dob: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
   created_at: string;
   updated_at: string;
-  deleted_at: string | null;
-  company_id: number | null;
-  two_factor_enabled: number;
-  last_login_at: string | null;
-  last_login_ip: string | null;
-  last_password_changed_at: string | null;
-  roles: Array<{
-    id: number;
-    name: string;
-    guard_name: string;
-    created_at: string;
-    updated_at: string;
-  }>;
 }
 export interface DriverProfileResponse {
   status: boolean;
@@ -348,8 +349,8 @@ export const authApi = {
     api.post<{
       status: string;
       didit_session_id: string;
-      session_token: string;
-      session_url: string;
+      session_token: string | null;
+      session_url: string | null;
     }>(
       "/register/liveness-session",
       { registration_token },

@@ -78,7 +78,8 @@ export default function ProfileScreen() {
         [active],
     );
     
-    const role = profile?.roles?.[0]?.name ?? "Driver";
+    // app_drivers has no role system — everyone signing in here is a driver.
+    const role = "Driver";
         
     const [avatarUri, setAvatarUri] = useState<string | undefined>(undefined);
     const [pickerVisible, setPickerVisible] = useState(false);
@@ -114,21 +115,24 @@ export default function ProfileScreen() {
                     setAvatarUri(profileData.profile_picture_url);
                 }
                 
-                if (profileData.cdl_front_path) {
-                    setCdlFront(
-                        profileData.cdl_front_path.startsWith("http") 
-                            ? profileData.cdl_front_path 
-                            : `${S3_BASE_URL}${profileData.cdl_front_path}`
-                    );
-                }
-                
-                if (profileData.cdl_back_path) {
-                    setCdlBack(
-                        profileData.cdl_back_path.startsWith("http") 
-                            ? profileData.cdl_back_path 
-                            : `${S3_BASE_URL}${profileData.cdl_back_path}`
-                    );
-                }
+                /*
+                 * The API now returns ready-made URLs. The path fallback stays
+                 * for older builds of the API, but only the server really knows
+                 * which bucket the file is in — so prefer what it tells us over
+                 * gluing a hardcoded hostname onto a storage path.
+                 */
+                const cdlUrl = (url?: string | null, path?: string | null) => {
+                    if (url) return url;
+                    if (!path) return null;
+                    return path.startsWith("http") ? path : `${S3_BASE_URL}${path}`;
+                };
+
+                setCdlFront(
+                    cdlUrl(profileData.cdl_front_image, profileData.cdl_front_path),
+                );
+                setCdlBack(
+                    cdlUrl(profileData.cdl_back_image, profileData.cdl_back_path),
+                );
             }
         } catch (error) {
             console.log("Could not fetch complete profile data", error);

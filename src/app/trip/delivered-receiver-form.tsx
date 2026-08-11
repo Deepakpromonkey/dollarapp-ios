@@ -4,6 +4,7 @@ import NavHeader from "@/components/NavHeader";
 import OtpInput from "@/components/signup/OtpInput";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { api } from "@/lib/api";
+import { loadApi } from "@/lib/loadApi";
 import { MaterialIcons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
@@ -43,6 +44,34 @@ export default function DeliveredReceiverFormScreen() {
     const [otp, setOtp] = useState<string[]>(Array(OTP_LENGTH).fill(""));
     const [otpError, setOtpError] = useState(false);
     const [submitting, setSubmitting] = useState(false);
+
+    // Where the code went, masked by the API. Doubles as "a code has been sent".
+    const [sentTo, setSentTo] = useState<string | null>(null);
+    const [sendingOtp, setSendingOtp] = useState(false);
+
+    /**
+     * The code goes to the receiver, never to the driver — possession of it is
+     * what proves someone at the delivery point signed off.
+     */
+    const sendOtp = async () => {
+        if (!uuid) return;
+        setSendingOtp(true);
+        try {
+            const res = await loadApi.sendStopOtp(uuid, "delivery");
+            setSentTo(res.data?.data?.sent_to ?? "the receiver");
+            Alert.alert(
+                "Code sent",
+                "The receiver contact has been texted a 6-digit code. Ask them to read it out.",
+            );
+        } catch (err: unknown) {
+            Alert.alert(
+                "Could not send code",
+                err instanceof Error ? err.message : "Please try again.",
+            );
+        } finally {
+            setSendingOtp(false);
+        }
+    };
 
     const otpFilled = otp.every((d) => d !== "");
 
@@ -235,8 +264,25 @@ export default function DeliveredReceiverFormScreen() {
                         <AppText
                             variant="caption"
                             style={{ color: theme.secondaryText }}>
-                            Get the 6-digit verification code from the receiver.
+                            {sentTo
+                                ? `Code sent to the receiver contact (${sentTo}). Ask them to read it out.`
+                                : "Send a code to the receiver contact, then ask them to read it out to you."}
                         </AppText>
+
+                        <AppButton
+                            title={
+                                sendingOtp
+                                    ? "Sending..."
+                                    : sentTo
+                                      ? "Resend code"
+                                      : "Send code to receiver"
+                            }
+                            variant="secondary"
+                            onPress={sendOtp}
+                            loading={sendingOtp}
+                            style={styles.sendOtpBtn}
+                        />
+
                         <OtpInput
                             value={otp}
                             onChange={(v) => {
@@ -336,6 +382,10 @@ const styles = StyleSheet.create({
     otpTitle: {
         fontWeight: "700",
         fontSize: 16,
+    },
+    sendOtpBtn: {
+        marginTop: 12,
+        marginBottom: 4,
     },
     submitBtn: {
         borderRadius: 16,

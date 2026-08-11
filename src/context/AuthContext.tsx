@@ -21,19 +21,18 @@ import { clearSession, getAccessToken, getStoredDriver, saveSession, StoredDrive
 
 export interface AuthUser {
     id: number;
-    rowId: string;
+    uuid: string;
     name: string;
     firstName: string;
     lastName: string;
     email: string;
-    contact: string;
-    profilePic: string;
-    roles: string;
-    carrierName: string;
-    activePlan: string;
+    contact: string | null;
+    profilePic: string | null;
+    carrierName: string | null;
     phoneVerified: boolean;
     livenessVerified: boolean;
-    status: number;
+    livenessStatus: "approved" | "in_review" | "declined" | "pending";
+    status: string;
 }
 
 interface AuthState {
@@ -56,21 +55,43 @@ type AuthContextValue = AuthState & AuthActions;
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+/*
+ * The subset of DriverResource that gets persisted. Shared with the signup
+ * screen: three call sites each writing this out by hand is how row_id and
+ * active_plan survived here long after the API stopped sending them.
+ */
+export function toStoredDriver(d: Driver): StoredDriver {
+    return {
+        id: d.id,
+        uuid: d.uuid,
+        name: d.name,
+        first_name: d.first_name,
+        last_name: d.last_name,
+        email: d.email,
+        contact: d.contact,
+        profile_pic: d.profile_pic,
+        carrier_name: d.carrier_name,
+        phone_verified: d.phone_verified,
+        liveness_verified: d.liveness_verified,
+        liveness_status: d.liveness_status,
+        status: d.status,
+    };
+}
+
 function mapDriver(d: Driver | StoredDriver): AuthUser {
     return {
         id: d.id,
-        rowId: d.row_id,
+        uuid: d.uuid,
         name: d.name || `${d.first_name} ${d.last_name}`.trim(),
         firstName: d.first_name,
         lastName: d.last_name,
         email: d.email,
         contact: d.contact,
         profilePic: d.profile_pic,
-        roles: d.roles,
         carrierName: d.carrier_name,
-        activePlan: d.active_plan,
         phoneVerified: d.phone_verified,
         livenessVerified: d.liveness_verified,
+        livenessStatus: d.liveness_status,
         status: d.status,
     };
 }
@@ -127,22 +148,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     async function persistAndHydrate(res: LoginResponse) {
         const { driver: d } = res;
-        const slim: StoredDriver = {
-            id: d.id,
-            row_id: d.row_id,
-            name: d.name,
-            first_name: d.first_name,
-            last_name: d.last_name,
-            email: d.email,
-            contact: d.contact,
-            profile_pic: d.profile_pic,
-            roles: d.roles,
-            carrier_name: d.carrier_name,
-            active_plan: d.active_plan,
-            phone_verified: d.phone_verified,
-            liveness_verified: d.liveness_verified,
-            status: d.status,
-        };
+        const slim: StoredDriver = toStoredDriver(d);
         await saveSession(res.token, slim);
         setUser(mapDriver(slim));
     }

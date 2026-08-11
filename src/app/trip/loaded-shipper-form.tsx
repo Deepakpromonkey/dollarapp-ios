@@ -4,6 +4,7 @@ import NavHeader from "@/components/NavHeader";
 import OtpInput from "@/components/signup/OtpInput";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { api } from "@/lib/api";
+import { loadApi } from "@/lib/loadApi";
 import { MaterialIcons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
@@ -46,6 +47,34 @@ export default function LoadedShipperFormScreen() {
     const [otp, setOtp] = useState<string[]>(Array(OTP_LENGTH).fill(""));
     const [otpError, setOtpError] = useState(false);
     const [submitting, setSubmitting] = useState(false);
+
+    // Where the code went, masked by the API. Doubles as "a code has been sent".
+    const [sentTo, setSentTo] = useState<string | null>(null);
+    const [sendingOtp, setSendingOtp] = useState(false);
+
+    /**
+     * The code goes to the shipper, never to the driver — that is what makes it
+     * evidence the driver is actually standing at the dock.
+     */
+    const sendOtp = async () => {
+        if (!uuid) return;
+        setSendingOtp(true);
+        try {
+            const res = await loadApi.sendStopOtp(uuid, "load");
+            setSentTo(res.data?.data?.sent_to ?? "the shipper");
+            Alert.alert(
+                "Code sent",
+                "The shipper contact has been texted a 6-digit code. Ask them to read it out.",
+            );
+        } catch (err: unknown) {
+            Alert.alert(
+                "Could not send code",
+                err instanceof Error ? err.message : "Please try again.",
+            );
+        } finally {
+            setSendingOtp(false);
+        }
+    };
 
     const otpFilled = otp.every((d) => d !== "");
     const canSubmit = otpFilled && sealNumber.trim().length > 0;
@@ -265,8 +294,25 @@ export default function LoadedShipperFormScreen() {
                         <AppText
                             variant="caption"
                             style={{ color: theme.secondaryText }}>
-                            Get the 6-digit verification code from the shipper.
+                            {sentTo
+                                ? `Code sent to the shipper contact (${sentTo}). Ask them to read it out.`
+                                : "Send a code to the shipper contact, then ask them to read it out to you."}
                         </AppText>
+
+                        <AppButton
+                            title={
+                                sendingOtp
+                                    ? "Sending..."
+                                    : sentTo
+                                      ? "Resend code"
+                                      : "Send code to shipper"
+                            }
+                            variant="secondary"
+                            onPress={sendOtp}
+                            loading={sendingOtp}
+                            style={styles.sendOtpBtn}
+                        />
+
                         <OtpInput
                             value={otp}
                             onChange={(v) => {
@@ -375,6 +421,10 @@ const styles = StyleSheet.create({
     otpTitle: {
         fontWeight: "700",
         fontSize: 16,
+    },
+    sendOtpBtn: {
+        marginTop: 12,
+        marginBottom: 4,
     },
     submitBtn: {
         borderRadius: 16,

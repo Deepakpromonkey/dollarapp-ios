@@ -2,12 +2,18 @@ import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Alert, Linking } from "react-native";
+import { BASE_URL } from "@/lib/api";
 import { getAccessToken } from "@/lib/secureStore";
 
 const LOCATION_TASK_NAME = "BACKGROUND_LOCATION_TASK";
 const LOCATION_QUEUE_KEY = "@offline_location_queue";
 const ACTIVE_SHIPMENT_KEY = "@active_shipment_uuid";
-const NGROK_URL = "https://mobility-twitter-tameness.ngrok-free.dev/api/driver/location-ping";
+/*
+| Pings go to the same API as everything else. This used to be a hardcoded
+| ngrok tunnel, which meant background tracking stopped working the moment that
+| tunnel was recycled — silently, because the task swallows its own errors.
+*/
+const LOCATION_PING_URL = `${BASE_URL}/driver/location-ping`;
 
 // Helper to extract interval from any response structure
 const extractInterval = (result: any): number | null => {
@@ -70,7 +76,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
           `[DollarTraq Tracker] 🚀 Sending ${locationQueue.length} location(s) to server...`
         );
 
-        const response = await fetch(NGROK_URL, {
+        const response = await fetch(LOCATION_PING_URL, {
           method: "POST",
           headers: {
             Accept: "application/json",
@@ -145,12 +151,19 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
 export const startLocationTracking = async (
   shipmentUuid: string,
-  intervalSeconds = 300
+  intervalSeconds?: number
 ) => {
+  /*
+   * An interval passed by the caller is the freshest thing available and wins.
+   * The cache is the fallback for a cold start — it keeps a restart from
+   * dropping to five minutes before the first ping can report the broker's real
+   * setting — but it used to outrank the argument, so the restart triggered by a
+   * broker change re-armed the tracker at the very rate it was replacing.
+   */
   const savedIntervalStr = await AsyncStorage.getItem("trackingInterval");
-  let activeInterval = savedIntervalStr
-    ? parseInt(savedIntervalStr)
-    : intervalSeconds;
+  let activeInterval =
+    intervalSeconds ??
+    (savedIntervalStr ? parseInt(savedIntervalStr, 10) : 300);
 
   console.log(
     `\n[DollarTraq Tracker] 🟢 INITIATING TRACKING for Shipment: ${shipmentUuid} at ${activeInterval}s intervals`
@@ -186,7 +199,7 @@ export const startLocationTracking = async (
       );
     } else {
       console.log("[DollarTraq Tracker] 🔑 Auth token found successfully.");
-      const response = await fetch(NGROK_URL, {
+      const response = await fetch(LOCATION_PING_URL, {
         method: "POST",
         headers: {
           Accept: "application/json",
@@ -254,6 +267,62 @@ export const startLocationTracking = async (
   );
 };
 
+/**
+ * Sends anything still sitting in the offline queue.
+ *
+ * Called before tracking is torn down. Without it, a driver who finished the
+ * trip while out of signal had their queued pings deleted by the cleanup below
+ * — the one moment the queue exists for.
+ *
+ * Best effort by design: if it fails the queue is left alone, so the next
+ * successful ping carries it instead.
+ */
+const flushPendingLocations = async (): Promise<boolean> => {
+  const storedQueue = await AsyncStorage.getItem(LOCATION_QUEUE_KEY);
+  const locationQueue = storedQueue ? JSON.parse(storedQueue) : [];
+
+  if (locationQueue.length === 0) return true;
+
+  const token = await getAccessToken();
+  const shipmentUuid = await AsyncStorage.getItem(ACTIVE_SHIPMENT_KEY);
+
+  if (!token || !shipmentUuid) return false;
+
+  try {
+    console.log(
+      `[DollarTraq Tracker] 📤 Flushing ${locationQueue.length} queued location(s) before stopping...`
+    );
+
+    const response = await fetch(LOCATION_PING_URL, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        shipment_uuid: shipmentUuid,
+        locations: locationQueue,
+      }),
+    });
+
+    // A 403 means the tracking window is closed, so these will never be
+    // accepted — dropping them is correct, not a loss.
+    if (response.ok || response.status === 403) {
+      await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);
+      return true;
+    }
+
+    console.warn(
+      `[DollarTraq Tracker] ⚠️ Flush rejected (${response.status}); keeping queue for next attempt.`
+    );
+    return false;
+  } catch (err) {
+    console.warn("[DollarTraq Tracker] 📶 Flush failed, keeping queue.", err);
+    return false;
+  }
+};
+
 export const stopLocationTracking = async () => {
   console.log(
     `\n[DollarTraq Tracker] 🔴 STOPPING TRACKING. Cleaning up active tasks...`
@@ -265,10 +334,18 @@ export const stopLocationTracking = async () => {
     console.log("[DollarTraq Tracker] ✅ Background task terminated.");
   }
 
+  const flushed = await flushPendingLocations();
+
   await AsyncStorage.removeItem(ACTIVE_SHIPMENT_KEY);
-  await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);
   await AsyncStorage.removeItem("trackingInterval");
+
+  // Only wipe what was delivered. An undelivered queue is kept so the next
+  // active load can carry it up rather than it being silently discarded.
+  if (flushed) {
+    await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);
+  }
+
   console.log(
-    "[DollarTraq Tracker] 🧹 Cleared active shipment UUID, tracking interval, and wiped queue."
+    `[DollarTraq Tracker] 🧹 Cleared active shipment and interval. Queue ${flushed ? "flushed" : "retained for retry"}.`
   );
 };

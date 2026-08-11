@@ -12,8 +12,9 @@ export default function VerificationStep({ onComplete }: VerificationStepProps) 
   const theme = useAppTheme();
 
   const handleOpenForm = () => {
-    router.push('/trip/verification-form');
-   
+    // There is no /trip/verification-form screen — equipment verification is
+    // the one that collects the VIN and the photos described below.
+    router.push('/trip/equipment-verification');
   };
 
   return (

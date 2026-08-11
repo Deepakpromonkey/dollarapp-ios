@@ -5,10 +5,10 @@ import Step3Profile from "@/components/signup/Step3Profile";
 import Step4EmailOTP from "@/components/signup/Step4EmailOTP";
 import Step5CDL from "@/components/signup/Step5CDL";
 import Step6Liveness from "@/components/signup/Step6Liveness";
-import { useAuth } from "@/context/AuthContext";
+import { toStoredDriver, useAuth } from "@/context/AuthContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { authApi } from "@/lib/api";
-import { saveSession, StoredDriver } from "@/lib/secureStore";
+import { saveSession } from "@/lib/secureStore";
 import * as ImageManipulator from "expo-image-manipulator";
 import { useRouter } from "expo-router";
 import { useState } from "react";
@@ -106,25 +106,21 @@ export default function SignupScreen() {
             });
 
             const { data: tokens } = await authApi.completeRegistration(formData);
-            const { driver: d } = tokens;
-            const slim: StoredDriver = {
-                id: d.id,
-                row_id: d.row_id,
-                name: d.name,
-                first_name: d.first_name,
-                last_name: d.last_name,
-                email: d.email,
-                contact: d.contact,
-                profile_pic: d.profile_pic,
-                roles: d.roles,
-                carrier_name: d.carrier_name,
-                active_plan: d.active_plan,
-                phone_verified: d.phone_verified,
-                liveness_verified: d.liveness_verified,
-                status: d.status,
-            };
-            await saveSession(tokens.token, slim);
+            await saveSession(tokens.token, toStoredDriver(tokens.driver));
             await hydrateFromSession();
+
+            /*
+             * The account is real either way — an undecided Didit session is not a
+             * failed one — but the driver should hear that their check is still
+             * open rather than discover it later from a blocked action.
+             */
+            if (tokens.liveness_status === "in_review") {
+                Alert.alert(
+                    "Identity check under review",
+                    tokens.message ??
+                        "Your account is ready, but your identity check needs a manual look. We will notify you as soon as it clears.",
+                );
+            }
         } catch (err: unknown) {
             console.error("[Signup] Registration failed:", err);
             const message =

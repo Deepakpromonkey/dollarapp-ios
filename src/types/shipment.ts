@@ -1,9 +1,36 @@
+/** How the broker wants a custom event answered. */
+export type AnswerType =
+    | "yes_no"
+    | "text"
+    | "textarea"
+    | "number"
+    | "image_upload";
+
+/**
+ * A question the broker attached to a stop, plus this driver's answer to it.
+ *
+ * The questions live on the stop; the answers are the driver's own. Loading and
+ * delivery stay blocked until every `required` one has been answered.
+ */
+export interface StopEvent {
+    id: string;
+    question: string;
+    answer_type: AnswerType;
+    required: boolean;
+    answered: boolean;
+    answer_value: string | null;
+    answer_image_url: string | null;
+    answered_at: string | null;
+}
+
 export interface ShipmentStop {
     id: number;
     shipment_id: number;
     stop_number: number;
     stop_type: "Pickup" | "Delivery" | string;
     stop_name: string;
+    contact_name: string | null;
+    contact_phone: string | null;
     address: string;
     address_2: string;
     city: string;
@@ -20,7 +47,12 @@ export interface ShipmentStop {
     longitude: string;
     comment_to_driver: string;
     alert_emails: string;
-    events: Array<{ customEventName: string; type: string; value: string }>;
+    events: Array<{
+        id: string;
+        question: string;
+        answer_type: AnswerType;
+        required: boolean;
+    }> | null;
     created_at: string;
     updated_at: string;
 }
@@ -51,6 +83,18 @@ export interface Shipment {
     tracking_start_at: string;
     notes: string;
     status: "Active" | "Upcoming" | "Past" | string;
+
+    /** True once this driver has started the load. */
+    is_activated: boolean;
+
+    /** True while the Activate button should be offered. */
+    can_activate: boolean;
+
+    is_equipment_verified: boolean;
+
+    /** Messages the broker sent that the driver has not opened yet. */
+    unread_messages: number;
+
     created_at: string;
     updated_at: string;
     stops: ShipmentStop[];

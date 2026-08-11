@@ -6,21 +6,26 @@ export const KEYS = {
 } as const;
 
 
+/*
+ * Every key here has to exist on the API's DriverResource. JSON.stringify drops
+ * undefined without a word, so a field this shape asks for and the response does
+ * not carry is not a type error — it is a detail that vanishes between signup
+ * and the next launch.
+ */
 export interface StoredDriver {
     id: number;
-    row_id: string;
+    uuid: string;
     name: string;
     first_name: string;
     last_name: string;
     email: string;
-    contact: string;
-    profile_pic: string;
-    roles: string;
-    carrier_name: string;
-    active_plan: string;
+    contact: string | null;
+    profile_pic: string | null;
+    carrier_name: string | null;
     phone_verified: boolean;
     liveness_verified: boolean;
-    status: number;
+    liveness_status: "approved" | "in_review" | "declined" | "pending";
+    status: string;
 }
 
 

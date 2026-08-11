@@ -1,13 +1,18 @@
+import AppButton from "@/components/AppButton";
 import AppText from "@/components/AppText";
 import NavHeader from "@/components/NavHeader";
 import SectionHeader from "@/components/SectionHeader";
+import StopEventsCard from "@/components/loads/StopEventsCard";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useShipments } from "@/hooks/useShipments";
+import { loadApi } from "@/lib/loadApi";
 import type { Shipment, ShipmentStop } from "@/types/shipment";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { useLocalSearchParams } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
+import { useState } from "react";
 import {
     ActivityIndicator,
+    Alert,
     ScrollView,
     StyleSheet,
     View,
@@ -240,10 +245,16 @@ function StopsList({ stops }: { stops: ShipmentStop[] }) {
 export default function LoadDetailScreen() {
     const theme = useAppTheme();
     const { id } = useLocalSearchParams<{ id: string }>();
-    const { active, upcoming, past, loading } = useShipments();
+    const { active, upcoming, past, loading, refresh } = useShipments();
+    const [activating, setActivating] = useState(false);
 
     const allShipments: Shipment[] = [...active, ...upcoming, ...past];
-    const shipment = allShipments.find((s) => String(s.id) === id);
+
+    // The list is keyed by id, but every journey endpoint is keyed by uuid, so
+    // match on either — a link built from one should not dead-end on the other.
+    const shipment = allShipments.find(
+        (s) => String(s.id) === id || s.uuid === id,
+    );
 
     const statusColor = shipment
         ? getStatusColor(shipment.status, theme.primaryButton, theme.err)
@@ -285,7 +296,40 @@ export default function LoadDetailScreen() {
         );
     }
 
-    const scheduledCount = shipment.stops.length;
+    const pickupStop = shipment.stops
+        .filter((s) => s.stop_type === "Pickup")
+        .sort((a, b) => a.stop_number - b.stop_number)[0];
+
+    const deliveryStop = shipment.stops
+        .filter((s) => s.stop_type === "Delivery")
+        .sort((a, b) => b.stop_number - a.stop_number)[0];
+
+    const hasEvents = (stop?: ShipmentStop) => (stop?.events?.length ?? 0) > 0;
+
+    /**
+     * Start the load. The API refuses a second activation, so a driver who
+     * double-taps gets told it is already running rather than a silent no-op.
+     */
+    const activate = async () => {
+        setActivating(true);
+        try {
+            await loadApi.activate(shipment.uuid);
+            refresh();
+            Alert.alert(
+                "Load activated",
+                "This load is now active. You can start your trip.",
+                [{ text: "Go to trip", onPress: () => router.push("/(tabs)/trip") },
+                 { text: "Stay here", style: "cancel" }],
+            );
+        } catch (err: unknown) {
+            Alert.alert(
+                "Could not activate",
+                err instanceof Error ? err.message : "Please try again.",
+            );
+        } finally {
+            setActivating(false);
+        }
+    };
 
     return (
         <SafeAreaView
@@ -310,6 +354,95 @@ export default function LoadDetailScreen() {
                             {shipment.status.toUpperCase()}
                         </AppText>
                     </View>
+                </View>
+
+                {/* Nothing else on this load can happen until it is started,
+                    so the button sits above the detail rather than below it. */}
+                {shipment.can_activate && (
+                    <View style={[styles.activateCard, { backgroundColor: theme.card }]}>
+                        <AppText
+                            variant="label"
+                            style={{ color: theme.text, fontWeight: "700" }}>
+                            Ready to start?
+                        </AppText>
+                        <AppText
+                            variant="caption"
+                            style={{ color: theme.secondaryText, marginTop: 4, marginBottom: 14 }}>
+                            Activating this load begins tracking and unlocks the trip steps.
+                        </AppText>
+                        <AppButton
+                            title={activating ? "Activating..." : "Activate Load"}
+                            onPress={activate}
+                            loading={activating}
+                        />
+                    </View>
+                )}
+
+                {shipment.is_activated && (
+                    <View style={[styles.activateCard, { backgroundColor: theme.card }]}>
+                        <View style={styles.activeRow}>
+                            <MaterialCommunityIcons
+                                name="check-decagram"
+                                size={18}
+                                color={theme.secondaryButton}
+                            />
+                            <AppText
+                                variant="label1"
+                                style={{ color: theme.text, flex: 1 }}>
+                                This load is active
+                            </AppText>
+                        </View>
+                        <AppButton
+                            title="Open trip"
+                            variant="secondary"
+                            onPress={() => router.push("/(tabs)/trip")}
+                            style={{ marginTop: 12 }}
+                        />
+                    </View>
+                )}
+
+                {/* Talking to dispatch about this load. The badge is the count
+                    of broker messages the driver has not opened. */}
+                <View style={[styles.activateCard, { backgroundColor: theme.card }]}>
+                    <View style={styles.activeRow}>
+                        <MaterialCommunityIcons
+                            name="message-text-outline"
+                            size={18}
+                            color={theme.primaryButton}
+                        />
+                        <AppText variant="label1" style={{ color: theme.text, flex: 1 }}>
+                            Message dispatch
+                        </AppText>
+                        {shipment.unread_messages > 0 && (
+                            <View
+                                style={[
+                                    styles.badge,
+                                    { backgroundColor: theme.err },
+                                ]}>
+                                <AppText variant="tiny" style={{ color: "#FFFFFF" }}>
+                                    {shipment.unread_messages}
+                                </AppText>
+                            </View>
+                        )}
+                    </View>
+                    <AppButton
+                        title={
+                            shipment.unread_messages > 0
+                                ? `Open chat (${shipment.unread_messages} new)`
+                                : "Open chat"
+                        }
+                        variant="secondary"
+                        onPress={() =>
+                            router.push({
+                                pathname: "/chat",
+                                params: {
+                                    uuid: shipment.uuid,
+                                    title: `${shipment.shipment_no || shipment.pro_number} · ${pickup?.city ?? ""} → ${delivery?.city ?? ""}`,
+                                },
+                            })
+                        }
+                        style={{ marginTop: 12 }}
+                    />
                 </View>
 
                 <SectionHeader label="Route" />
@@ -358,6 +491,31 @@ export default function LoadDetailScreen() {
                     <>
                         <SectionHeader label="Stops" />
                         <StopsList stops={shipment.stops} />
+                    </>
+                )}
+
+                {/* The broker's questions. Only worth showing once the load is
+                    running — before that there is nothing to answer them about,
+                    and the API will not accept them anyway. */}
+                {shipment.is_activated && hasEvents(pickupStop) && (
+                    <>
+                        <SectionHeader label="Pickup Questions" />
+                        <StopEventsCard
+                            shipmentUuid={shipment.uuid}
+                            stopId={pickupStop.id}
+                            title={`Pickup · ${pickupStop.stop_name || pickupStop.city || "Stop"}`}
+                        />
+                    </>
+                )}
+
+                {shipment.is_activated && hasEvents(deliveryStop) && (
+                    <>
+                        <SectionHeader label="Delivery Questions" />
+                        <StopEventsCard
+                            shipmentUuid={shipment.uuid}
+                            stopId={deliveryStop.id}
+                            title={`Delivery · ${deliveryStop.stop_name || deliveryStop.city || "Stop"}`}
+                        />
                     </>
                 )}
 
@@ -434,6 +592,27 @@ const styles = StyleSheet.create({
         borderRadius: 16,
         padding: 16,
         marginBottom: 20,
+    },
+
+    activateCard: {
+        borderRadius: 16,
+        padding: 16,
+        marginBottom: 20,
+    },
+
+    activeRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+    },
+
+    badge: {
+        minWidth: 20,
+        height: 20,
+        borderRadius: 10,
+        paddingHorizontal: 6,
+        alignItems: "center",
+        justifyContent: "center",
     },
 
     infoGrid: {

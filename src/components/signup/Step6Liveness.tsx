@@ -22,7 +22,13 @@ interface Step6LivenessProps {
     onComplete: (diditSessionId: string) => void;
 }
  
-type LivenessState = "intro" | "loading" | "done" | "error";
+type LivenessState = "intro" | "loading" | "done" | "review" | "error";
+
+/*
+ * What the backend accepts, in local only, to skip the Didit call entirely.
+ * Keep in sync with $bypassTokens in DriverAuthController::completeRegistration.
+ */
+const DEV_BYPASS_SESSION_ID = "dev_bypass";
  
 export default function Step6Liveness({
     registrationToken,
@@ -53,11 +59,19 @@ export default function Step6Liveness({
  
             switch (result.type) {
                 case "completed":
-                    if (
-                        result.session.status === VerificationStatus.Approved ||
-                        result.session.status === VerificationStatus.Pending
-                    ) {
+                    /*
+                     * Approved is clean. Pending means Didit has not decided — a
+                     * duplicate face, or a document queued for a human — and the
+                     * verdict arrives at the backend by webhook later, so the
+                     * account is still created, just unverified. Only telling the
+                     * driver "verified!" for a session that is actually approved
+                     * keeps the screen honest about which of the two happened.
+                     */
+                    if (result.session.status === VerificationStatus.Approved) {
                         setUiState("done");
+                        onComplete(didit_session_id);
+                    } else if (result.session.status === VerificationStatus.Pending) {
+                        setUiState("review");
                         onComplete(didit_session_id);
                     } else {
                         setErrorMessage(
@@ -123,6 +137,29 @@ export default function Step6Liveness({
         );
     }
  
+    if (uiState === "review") {
+        return (
+            <View style={[styles.resultContainer, { backgroundColor: theme.background }]}>
+                <MaterialCommunityIcons
+                    name="clock-outline"
+                    size={64}
+                    color={theme.secondaryText}
+                />
+                <AppText
+                    variant="title"
+                    style={{ color: theme.text, textAlign: "center", marginTop: 20 }}>
+                    Under review
+                </AppText>
+                <AppText
+                    variant="label1"
+                    style={{ color: theme.secondaryText, textAlign: "center", marginTop: 8, paddingHorizontal: 24 }}>
+                    Your identity check needs a manual look. We are creating your
+                    account now and will notify you as soon as it clears.
+                </AppText>
+            </View>
+        );
+    }
+
     if (uiState === "error") {
         return (
             <View style={[styles.resultContainer, { backgroundColor: theme.background }]}>
@@ -224,6 +261,23 @@ export default function Step6Liveness({
                         onPress={handleStart}
                         style={styles.primaryButton}
                     />
+
+                    {/*
+                      * Development only. The backend honours this session id in
+                      * `local` alone, so a build that somehow shipped the button
+                      * would get a 422 rather than an unverified account.
+                      */}
+                    {__DEV__ && (
+                        <AppButton
+                            title="Skip liveness (dev)"
+                            variant="secondary"
+                            onPress={() => {
+                                setUiState("done");
+                                onComplete(DEV_BYPASS_SESSION_ID);
+                            }}
+                            style={styles.devButton}
+                        />
+                    )}
                 </View>
             </KeyboardAwareScrollView>
         </View>
@@ -298,6 +352,11 @@ const styles = StyleSheet.create({
         borderRadius: 16,
         marginBottom: 24,
         marginTop: 12,
+        width: "100%",
+    },
+    devButton: {
+        borderRadius: 16,
+        marginBottom: 24,
         width: "100%",
     },
     resultContainer: {

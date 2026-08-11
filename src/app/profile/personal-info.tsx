@@ -62,7 +62,8 @@ export default function PersonalInfoScreen() {
         ? `${profile.first_name} ${profile.last_name}`.trim()
         : null;
 
-    const role = profile?.roles?.[0]?.name ?? null;
+    // app_drivers has no role system — everyone signing in here is a driver.
+    const role = profile ? "Driver" : null;
 
     return (
         <SafeAreaView
@@ -84,9 +85,9 @@ export default function PersonalInfoScreen() {
                         showsVerticalScrollIndicator={false}>
                         {/* Avatar */}
                         <View style={styles.avatarSection}>
-                            {profile?.profile_image ? (
+                            {profile?.profile_picture_url ? (
                                 <Image
-                                    source={{ uri: profile.profile_image }}
+                                    source={{ uri: profile.profile_picture_url }}
                                     style={styles.avatar}
                                 />
                             ) : (

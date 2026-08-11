@@ -3,7 +3,10 @@ import NavHeader from "@/components/NavHeader";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useEffect, useRef, useState } from "react";
+import { useLocalSearchParams } from "expo-router";
+import { useShipmentChat } from "@/hooks/useShipmentChat";
 import {
+    ActivityIndicator,
     Animated,
     Keyboard,
     Platform,
@@ -18,37 +21,26 @@ import {
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-type Message = {
-    id: string;
-    text: string;
-    sender: "me" | "dispatcher";
-    time: string;
-};
-
-const INITIAL_MESSAGES: Message[] = [
-    {
-        id: "1",
-        sender: "dispatcher",
-        text: "Hey! Your load DT-48390 is confirmed. You're good to head to the shipper.",
-        time: "08:12 AM",
-    },
-    {
-        id: "2",
-        sender: "me",
-        text: "Got it, heading there now.",
-        time: "08:15 AM",
-    },
-    {
-        id: "3",
-        sender: "dispatcher",
-        text: "ETA looks good. Let me know when you're at the pickup.",
-        time: "08:17 AM",
-    },
-];
-
+/** Wall-clock time for a bubble, from the servers ISO timestamp. */
+function bubbleTime(iso: string): string {
+    const d = new Date(iso);
+    return isNaN(d.getTime())
+        ? ""
+        : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 export default function ChatScreen() {
     const theme = useAppTheme();
-    const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
+
+    // Which load's conversation this is. The chat is per shipment, so without
+    // a uuid there is nothing to show.
+    const { uuid, title } = useLocalSearchParams<{
+        uuid?: string;
+        title?: string;
+    }>();
+
+    const { messages, shipmentNo, loading, sending, error, send } =
+        useShipmentChat(uuid);
+
     const [input, setInput] = useState("");
     const scrollRef = useRef<ScrollView>(null);
     const translateY = useRef(new Animated.Value(0)).current;
@@ -84,23 +76,23 @@ export default function ChatScreen() {
         };
     }, []);
 
-    const sendMessage = () => {
+    const sendMessage = async () => {
         const trimmed = input.trim();
-        if (!trimmed) return;
-        const newMsg: Message = {
-            id: Date.now().toString(),
-            sender: "me",
-            text: trimmed,
-            time: new Date().toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-            }),
-        };
-        setMessages((prev) => [...prev, newMsg]);
+        if (!trimmed || sending) return;
+
+        // Cleared up front so the field feels responsive, and put back if the
+        // send fails — retyping a message the app appeared to accept is worse
+        // than seeing it return to the box.
         setInput("");
-        setTimeout(() => {
-            scrollRef.current?.scrollToEnd({ animated: true });
-        }, 100);
+
+        try {
+            await send(trimmed);
+            setTimeout(() => {
+                scrollRef.current?.scrollToEnd({ animated: true });
+            }, 100);
+        } catch {
+            setInput(trimmed);
+        }
     };
 
     return (
@@ -120,9 +112,17 @@ export default function ChatScreen() {
                 <AppText
                     variant="tiny"
                     style={{ color: theme.primaryButton, marginLeft: 4 }}>
-                    Load DT-48390 · Dallas → Chicago
+                    {title || shipmentNo || "Load"}
                 </AppText>
             </View>
+
+            {error && (
+                <View style={styles.noticeRow}>
+                    <AppText variant="caption" style={{ color: theme.err }}>
+                        {error}
+                    </AppText>
+                </View>
+            )}
 
             <KeyboardAwareScrollView
                 ref={scrollRef as any}
@@ -136,11 +136,27 @@ export default function ChatScreen() {
                 onContentSizeChange={() =>
                     scrollRef.current?.scrollToEnd({ animated: false })
                 }>
+                {loading && messages.length === 0 && (
+                    <View style={styles.noticeRow}>
+                        <ActivityIndicator color={theme.primaryButton} />
+                    </View>
+                )}
+
+                {!loading && messages.length === 0 && (
+                    <View style={styles.noticeRow}>
+                        <AppText
+                            variant="caption"
+                            style={{ color: theme.secondaryText, textAlign: "center" }}>
+                            No messages yet. Send your dispatcher a note about this load.
+                        </AppText>
+                    </View>
+                )}
+
                 {messages.map((item) => {
-                    const isMe = item.sender === "me";
+                    const isMe = item.sender_type === "driver";
                     return (
                         <View
-                            key={item.id}
+                            key={item.uuid}
                             style={[
                                 styles.bubbleRow,
                                 isMe ? styles.bubbleRowMe : styles.bubbleRowThem,
@@ -170,7 +186,7 @@ export default function ChatScreen() {
                                             color: isMe ? "#fff" : theme.text,
                                             lineHeight: 20,
                                         }}>
-                                        {item.text}
+                                        {item.body}
                                     </AppText>
                                 </View>
                                 <AppText
@@ -182,7 +198,7 @@ export default function ChatScreen() {
                                             ? ({ textAlign: "right" } as TextStyle)
                                             : ({} as TextStyle),
                                     ]}>
-                                    {item.time}
+                                    {bubbleTime(item.created_at)}
                                 </AppText>
                             </View>
                         </View>
@@ -229,6 +245,11 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
     screen: { flex: 1 },
     headerWrap: { zIndex: 10 },
+    noticeRow: {
+        paddingVertical: 16,
+        paddingHorizontal: 20,
+        alignItems: "center",
+    },
     loadTag: {
         flexDirection: "row",
         alignItems: "center",

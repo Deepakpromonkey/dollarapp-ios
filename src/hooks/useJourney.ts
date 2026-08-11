@@ -32,6 +32,7 @@ interface JourneyResponse {
     data: {
         current_step: TripStepId;
         journey: JourneyData;
+        is_equipment_verified: boolean;
     };
 }
 
@@ -48,6 +49,16 @@ const STEP_INDEX: Record<string, number> = {
 interface JourneyState {
     activeIndex: number;
     journey: JourneyData | null;
+
+    /**
+     * Whether the VIN, tractor and trailer photos are on file for this load.
+     *
+     * Comes from the server on every refresh rather than being remembered in
+     * the app, so backgrounding or reloading does not lose it — and so the
+     * app's idea of it cannot drift from what the API will actually allow.
+     */
+    equipmentVerified: boolean;
+
     loading: boolean;
     error: string | null;
     refresh: () => void;
@@ -59,6 +70,7 @@ interface JourneyState {
 export function useJourney(uuid: string | null | undefined): JourneyState {
     const [activeIndex, setActiveIndex] = useState(0);
     const [journey, setJourney] = useState<JourneyData | null>(null);
+    const [equipmentVerified, setEquipmentVerified] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [tick, setTick] = useState(0);
@@ -84,6 +96,7 @@ export function useJourney(uuid: string | null | undefined): JourneyState {
 
                 setActiveIndex(idx);
                 setJourney(res.data?.data?.journey ?? null);
+                setEquipmentVerified(!!res.data?.data?.is_equipment_verified);
             } catch (err: unknown) {
                 if (cancelled) return;
                 if (
@@ -94,6 +107,7 @@ export function useJourney(uuid: string | null | undefined): JourneyState {
                 ) {
                     setActiveIndex(0);
                     setJourney(null);
+                    setEquipmentVerified(false);
                 } else {
                     const msg =
                         err instanceof Error
@@ -112,5 +126,5 @@ export function useJourney(uuid: string | null | undefined): JourneyState {
         };
     }, [uuid, tick]);
 
-    return { activeIndex, journey, loading, error, refresh };
+    return { activeIndex, journey, equipmentVerified, loading, error, refresh };
 }

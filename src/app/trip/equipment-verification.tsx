@@ -22,9 +22,28 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 type CameraTarget = "vin_image" | "tractor_image" | "trailer_image" | null;
 
-export let equipmentVerificationDone = false;
-export function setEquipmentVerificationDone(val: boolean) {
-    equipmentVerificationDone = val;
+/*
+ * Loads whose equipment photos this session has already uploaded.
+ *
+ * Keyed by shipment, not a single boolean. A bare flag stayed true for the rest
+ * of the session once any load had been verified, so the next load rendered its
+ * stop cards as though it had been photographed too — and "Mark arrival" then
+ * failed on the server with a message the card offered no way to act on. Which
+ * is exactly what a driver sees as "it asks for the VIN but there is no button".
+ *
+ * Only an optimistic echo of what the server already knows, so the UI can move
+ * on without waiting for the next refresh. The server stays the authority.
+ */
+const locallyVerified = new Set<string>();
+
+export function markEquipmentVerified(uuid: string): void {
+    locallyVerified.add(uuid);
+}
+
+export function isEquipmentVerifiedLocally(
+    uuid: string | null | undefined,
+): boolean {
+    return !!uuid && locallyVerified.has(uuid);
 }
 
 export default function EquipmentVerificationScreen() {
@@ -152,7 +171,7 @@ export default function EquipmentVerificationScreen() {
                 trailer_text: trailerText,
             });
 
-            setEquipmentVerificationDone(true);
+            if (uuid) markEquipmentVerified(uuid);
             router.back();
         } catch (err: unknown) {
             const msg =
