@@ -7,6 +7,7 @@ import React, {
     useMemo,
     useState,
 } from "react";
+import { OneSignal } from 'react-native-onesignal';
 
 import {
     ApiError,
@@ -148,6 +149,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     async function persistAndHydrate(res: LoginResponse) {
         const { driver: d } = res;
+        
+        if (d.id) {
+            OneSignal.login(d.id.toString());
+        }
+
         const slim: StoredDriver = toStoredDriver(d);
         await saveSession(res.token, slim);
         setUser(mapDriver(slim));
@@ -203,6 +209,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setIsSubmitting(true);
         try {
             await authApi.logout().catch(() => {});
+            
+            OneSignal.logout();
+
         } finally {
             await clearSession();
             setUser(null);

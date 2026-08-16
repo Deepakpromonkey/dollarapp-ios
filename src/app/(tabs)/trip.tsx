@@ -33,6 +33,9 @@ import {
   StatusBar,
   StyleSheet,
   View,
+  AppState,
+  Alert,
+  Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { isEquipmentVerifiedLocally } from "../trip/equipment-verification";
@@ -96,11 +99,6 @@ export default function TripScreen() {
     refresh: refreshJourney,
   } = useJourney(shipment?.uuid);
 
-  /*
-   * The stop-by-stop journey. This is the real state now — the five-step
-   * timeline above is a summary of it, kept because the visual is useful on a
-   * two-stop run.
-   */
   const {
     stops: progressStops,
     loading: progressLoading,
@@ -108,19 +106,10 @@ export default function TripScreen() {
     apply: applyProgress,
   } = useStopProgress(shipment?.uuid);
 
-  /*
-   * The server is the authority here — it refuses to start the journey without
-   * the photos, so anything the app believes on its own can only be wrong. The
-   * local echo is consulted so the UI advances immediately after an upload,
-   * before the next journey refresh lands, and it is scoped to this shipment so
-   * one verified load cannot vouch for the next one.
-   */
   const equipmentVerified =
     serverEquipmentVerified ||
     !!journey?.shipper_arrived_at ||
     isEquipmentVerifiedLocally(shipment?.uuid);
-
-  //   const { isTracking, startTracking, stopTracking } = useLocationTracking();
 
   const [localIndex, setLocalIndex] = useState<number | null>(null);
   const currentIndex =
@@ -145,11 +134,6 @@ export default function TripScreen() {
       }
     : undefined;
 
-  /*
-   * The line on the map follows every stop in order, not just the first and the
-   * last — on a four-stop run, drawing Detroit straight to Chicago would show a
-   * route the driver is not taking.
-   */
   const ROUTE: TripWaypoint[] = (shipment?.stops ?? [])
     .slice()
     .sort((a, b) => a.stop_number - b.stop_number)
@@ -162,6 +146,9 @@ export default function TripScreen() {
 
   const isJourneyCompleted = activeIndex >= 5;
 
+  // ------------------------------------------------------------------
+  // 1. STANDARD TRACKING TRIGGER (Runs on load changes)
+  // ------------------------------------------------------------------
   useEffect(() => {
     if (shipment && !isJourneyCompleted) {
       startLocationTracking(shipment.uuid);
@@ -169,6 +156,45 @@ export default function TripScreen() {
       stopLocationTracking();
     }
   }, [shipment?.uuid, isJourneyCompleted]);
+
+  // ------------------------------------------------------------------
+  // 2. THE SILENT RESTARTER & PERMISSION ENFORCER (Runs on app open)
+  // ------------------------------------------------------------------
+  const appState = useRef(AppState.currentState);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", async (nextAppState) => {
+      if (appState.current.match(/inactive|background/) && nextAppState === "active") {
+        
+        // Only care if there is an active shipment and trip is not completed
+        if (shipment?.uuid && !isJourneyCompleted) {
+          const bgPerm = await ExpoLocation.getBackgroundPermissionsAsync();
+          const isRunning = await ExpoLocation.hasStartedLocationUpdatesAsync("BACKGROUND_LOCATION_TASK").catch(() => false);
+
+          if (bgPerm.status !== "granted") {
+            // THE WALL: Driver changed permission in settings. Block them.
+            Alert.alert(
+              "Tracking Disabled",
+              "You must set location to 'Always Allow' to continue driving this active load.",
+              [
+                { text: "Open Settings", onPress: () => Linking.openSettings() }
+              ]
+            );
+          } else if (!isRunning) {
+            // QUIET REBOOT: App was swiped up, but permissions are still good. Turn it back on silently.
+            console.log("[TripScreen] 🤫 App restarted. Quietly rebooting tracker...");
+            startLocationTracking(shipment.uuid);
+          }
+        }
+      }
+      appState.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [shipment?.uuid, isJourneyCompleted]);
+  // ------------------------------------------------------------------
 
   const steps: TripStep[] = STEPS_CONFIG.map((s, i) => ({
     ...s,
@@ -326,11 +352,6 @@ export default function TripScreen() {
         </View>
       </Modal>
 
-      {/*
-        With no load assigned there is no journey to act on — the sheet would
-        only show placeholder stops and an ETA for a trip that does not exist,
-        so the screen stays a plain map until dispatch assigns one.
-      */}
       {shipment && (
         <BottomSheet
           ref={bottomSheetRef}
@@ -610,9 +631,6 @@ export default function TripScreen() {
                   </View>
                 ) : (
                   <>
-                    {/* Equipment gates the whole journey, so it is asked for
-                        before any stop is offered — the API refuses arrival
-                        without it. */}
                     {!equipmentVerified ? (
                       <ArrivedShipperStep
                         onArrive={advance}
@@ -625,12 +643,6 @@ export default function TripScreen() {
                       />
                     ) : (
                       <>
-                        {/*
-                          One card per stop, in order, generated from the load
-                          rather than from a fixed list of five. A two-stop run
-                          and a six-stop run render through the same code, and the
-                          stops in the middle are finally reachable.
-                        */}
                         {progressLoading && progressStops.length === 0 && (
                           <ActivityIndicator color={theme.primaryButton} />
                         )}

@@ -9,7 +9,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import * as Location from "expo-location";
 import { router } from "expo-router";
 import { useState } from "react";
-import { Alert, StyleSheet, TextInput, View } from "react-native";
+import { Alert, Linking, StyleSheet, TextInput, View } from "react-native";
 
 const OTP_LENGTH = 6;
 
@@ -98,19 +98,42 @@ export default function StopActionCard({
     };
 
     /** Arrival is checked against the stop's coordinates, so send a real fix. */
-    const arrive = async () => {
+  const arrive = async () => {
         setBusy(true);
         try {
-            const permission = await Location.requestForegroundPermissionsAsync();
+            // 1. First, check/request foreground permission (Required by OS before background)
+            const fgPermission = await Location.requestForegroundPermissionsAsync();
 
-            if (!permission.granted) {
+            if (!fgPermission.granted) {
                 Alert.alert(
                     "Location needed",
-                    "Marking arrival needs your location, so the broker can see you reached this stop.",
+                    "We need your location to mark arrival so the broker can see you reached this stop.",
+                    [
+                        { text: "Cancel", style: "cancel" },
+                        { text: "Open Settings", onPress: () => Linking.openSettings() }
+                    ]
                 );
+                setBusy(false);
                 return;
             }
 
+            // 2. Next, check/request background permission ("Allow all the time")
+            const bgPermission = await Location.requestBackgroundPermissionsAsync();
+
+            if (!bgPermission.granted) {
+                Alert.alert(
+                    "Background Tracking Required",
+                    "To mark arrival and start this trip, you must set location access to 'Allow all the time'. This ensures the broker can track the load even when your phone screen is off.",
+                    [
+                        { text: "Cancel", style: "cancel" },
+                        { text: "Open Settings", onPress: () => Linking.openSettings() }
+                    ]
+                );
+                setBusy(false);
+                return;
+            }
+
+            // 3. If they passed both checks, they have "Always Allow". Get the location!
             const position = await Location.getCurrentPositionAsync({
                 accuracy: Location.Accuracy.Balanced,
             });
@@ -271,7 +294,7 @@ export default function StopActionCard({
                                 Get within 500 m of this stop, then mark your arrival.
                             </AppText>
                             <AppButton
-                                title={busy ? "Checking your location..." : "Mark arrival"}
+                                title={busy ? "Checking your location..." : "Mark arrival "}
                                 onPress={arrive}
                                 loading={busy}
                                 style={styles.action}

@@ -1,5 +1,5 @@
 import "react-native-gesture-handler";
-import "@/services/locationTracking";
+import "@/utils/LocationTracker";
 
 import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
@@ -10,7 +10,10 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { ThemeProvider, useThemeContext } from "@/context/ThemeContext";
-import '../utils/LocationTracker';
+// import '../utils/LocationTracker';
+
+// 🚨 NEW: Import OneSignal
+import { LogLevel, OneSignal } from 'react-native-onesignal';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -33,6 +36,12 @@ function AppNavigator() {
 }
 
 export default function RootLayout() {
+    // 🚨 NEW: Turn on OneSignal the moment the app boots!
+    useEffect(() => {
+        OneSignal.initialize("093cd863-0342-4491-a75e-61e728e7d542"); 
+        OneSignal.Notifications.requestPermission(true);
+    }, []);
+
     const [fontsLoaded, fontError] = useFonts({
         "Poppins-Regular": require("../../assets/fonts/Poppins-Regular.ttf"),
         "Poppins-Medium": require("../../assets/fonts/Poppins-Medium.ttf"),

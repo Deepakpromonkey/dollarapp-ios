@@ -8,6 +8,8 @@ import { getAccessToken } from "@/lib/secureStore";
 const LOCATION_TASK_NAME = "BACKGROUND_LOCATION_TASK";
 const LOCATION_QUEUE_KEY = "@offline_location_queue";
 const ACTIVE_SHIPMENT_KEY = "@active_shipment_uuid";
+const WAKE_STAMP_KEY = "@last_task_wake"; 
+
 /*
 | Pings go to the same API as everything else. This used to be a hardcoded
 | ngrok tunnel, which meant background tracking stopped working the moment that
@@ -38,23 +40,37 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     return;
   }
 
+  // 🚨 THE BLACK BOX DIARY STAMP
+  // Every single time this task wakes up, write down the exact timestamp.
+  // This happens instantly, even if there is zero internet.
+  await AsyncStorage.setItem(WAKE_STAMP_KEY, Date.now().toString());
+
   if (data) {
     const { locations } = data as any;
     const location = locations[0];
 
     if (location) {
+      // 🚨 ASK THE PHONE FOR PROOF
+      // We check if they still have "Always Allow" enabled in the background
+      const bgPerm = await Location.getBackgroundPermissionsAsync();
+
       const newPing = {
         lat: location.coords.latitude,
         lng: location.coords.longitude,
         accuracy: location.coords.accuracy,
         device_timestamp: Date.now(),
+        // 🚨 ATTACH THE PROOF TO THE PAYLOAD
+        // mocked checks if they are using a fake GPS app.
+        // bg_permission checks if they took away tracking rights.
+        is_mocked: location.mocked ?? false,
+        bg_permission: bgPerm.status === "granted",
       };
 
       console.log(
         `\n[DollarTraq Tracker] 📡 GPS Wakeup at ${new Date().toLocaleTimeString()}`
       );
       console.log(
-        `[DollarTraq Tracker] 📍 Captured coordinates: Lat ${newPing.lat}, Lng ${newPing.lng}`
+        `[DollarTraq Tracker] 📍 Captured coordinates: Lat ${newPing.lat}, Lng ${newPing.lng} | Mocked: ${newPing.is_mocked} | BG Perm: ${newPing.bg_permission}`
       );
 
       try {
@@ -179,8 +195,34 @@ export const startLocationTracking = async (
 
   const { status: backgroundStatus } =
     await Location.requestBackgroundPermissionsAsync();
+  // if (backgroundStatus !== "granted") {
+  //   console.error("[DollarTraq Tracker] ❌ Background permission denied.");
+  //   return;
+  // }
+
   if (backgroundStatus !== "granted") {
     console.error("[DollarTraq Tracker] ❌ Background permission denied.");
+    
+    // 🚨 FIRE THE FLARE TO THE SERVER BEFORE ABORTING!
+   // 🚨 FIRE THE FLARE TO THE SERVER BEFORE ABORTING!
+      const token = await getAccessToken();
+      const shipmentUuid = await AsyncStorage.getItem(ACTIVE_SHIPMENT_KEY);
+
+      if (token && shipmentUuid) {
+        console.log("[DollarTraq Tracker] 🚀 Firing alert flare to server...");
+        
+        fetch(LOCATION_PING_URL, {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+                shipment_uuid: shipmentUuid,
+                locations: [{ lat: 0, lng: 0, device_timestamp: Date.now(), bg_permission: false }]
+            }),
+        })
+        .then(async (res) => console.log("[DollarTraq Tracker] 🎯 Flare Response:", await res.text()))
+        .catch((err) => console.error("[DollarTraq Tracker] ⚠️ Flare Error:", err));
+      }
+
     return;
   }
 
@@ -199,6 +241,10 @@ export const startLocationTracking = async (
       );
     } else {
       console.log("[DollarTraq Tracker] 🔑 Auth token found successfully.");
+      
+      // 🚨 Ask for permission proof on the very first ping too
+      const bgPerm = await Location.getBackgroundPermissionsAsync();
+
       const response = await fetch(LOCATION_PING_URL, {
         method: "POST",
         headers: {
@@ -215,6 +261,9 @@ export const startLocationTracking = async (
               lng: initialLoc.coords.longitude,
               accuracy: initialLoc.coords.accuracy,
               device_timestamp: Date.now(),
+              // 🚨 Send the proof on the initial ping
+              is_mocked: initialLoc.mocked ?? false,
+              bg_permission: bgPerm.status === "granted"
             },
           ],
         }),
@@ -339,8 +388,8 @@ export const stopLocationTracking = async () => {
   await AsyncStorage.removeItem(ACTIVE_SHIPMENT_KEY);
   await AsyncStorage.removeItem("trackingInterval");
 
-  // Only wipe what was delivered. An undelivered queue is kept so the next
-  // active load can carry it up rather than it being silently discarded.
+  await AsyncStorage.removeItem(WAKE_STAMP_KEY); 
+
   if (flushed) {
     await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);
   }
