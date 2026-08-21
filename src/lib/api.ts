@@ -8,8 +8,8 @@ import axios, {
 
 import { clearSession, getAccessToken } from "./secureStore";
 
-export const BASE_URL = "https://driverapi.dollartraq.com/api";
-// export const BASE_URL = "https://mobility-twitter-tameness.ngrok-free.dev/api";
+// export const BASE_URL = "https://driverapi.dollartraq.com/api";
+export const BASE_URL = "https://mobility-twitter-tameness.ngrok-free.dev/api";
 
 export class ApiError extends Error {
   constructor(
@@ -26,6 +26,29 @@ export interface ApiResponse<T = unknown> {
   data: T;
   status: number;
   ok: boolean;
+}
+
+export interface StopEventData {
+  stop_id: number;
+  stop_type: string;
+  requires_otp: boolean;
+  events: any[]; // Or whatever your events type is
+  outstanding: number;
+}
+
+export interface JourneyStatusResponse {
+  status: boolean;
+  message: string;
+  data: {
+    current_step: string;
+    journey: any;
+    is_equipment_verified: boolean;
+    stop_events: {
+      pickup: StopEventData | null;
+      delivery: StopEventData | null;
+      all_stops: StopEventData[];
+    };
+  };
 }
 
 interface AppRequestConfig extends AxiosRequestConfig {
