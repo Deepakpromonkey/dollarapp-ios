@@ -8,8 +8,9 @@ import axios, {
 
 import { clearSession, getAccessToken } from "./secureStore";
 
-// export const BASE_URL = "https://driverapi.dollartraq.com/api";
-export const BASE_URL = "https://mobility-twitter-tameness.ngrok-free.dev/api";
+ 
+export const BASE_URL = "https://driverapi.dollartraq.com/api";
+// export const BASE_URL = "https://mobility-twitter-tameness.ngrok-free.dev/api";
 
 export class ApiError extends Error {
   constructor(
@@ -189,6 +190,7 @@ export interface LoginPayload {
 export interface OtpLoginPayload {
   contact: string;
   otp: string;
+  device_token?: string | null;
 }
 /*
  * Mirrors DriverResource on the API. This used to describe the broker API's

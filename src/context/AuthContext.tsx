@@ -45,7 +45,7 @@ interface AuthState {
 
 interface AuthActions {
     login: (payload: LoginPayload) => Promise<void>;
-    loginOtp: (contact: string, otp: string) => Promise<void>;
+    loginOtp: (contact: string, otp: string, device_token?: string | null) => Promise<void>;
     signup: (payload: SignupPayload) => Promise<void>;
     logout: () => Promise<void>;
     clearError: () => void;
@@ -173,11 +173,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
     }, []);
 
-    const loginOtp = useCallback(async (contact: string, otp: string) => {
+    const loginOtp = useCallback(async (contact: string, otp: string,device_token?: string | null) => {
         setIsSubmitting(true);
         setError(null);
         try {
-            const { data } = await authApi.loginOtp({ contact, otp });
+            const { data } = await authApi.loginOtp({ contact, otp , device_token});
             await persistAndHydrate(data);
         } catch (err) {
             setError(extractErrorMessage(err));
