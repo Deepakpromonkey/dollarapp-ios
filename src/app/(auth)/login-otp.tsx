@@ -1,3 +1,4 @@
+import { LogLevel, OneSignal } from 'react-native-onesignal';
 import AppButton from "@/components/AppButton";
 import AppInput from "@/components/AppInput";
 import AppText from "@/components/AppText";
@@ -82,7 +83,7 @@ export default function LoginOTPScreen() {
         }
     };
 
-    const handleVerify = async () => {
+   const handleVerify = async () => {
         const code = otp.join("");
         if (code.length < OTP_LENGTH) {
             setHasError(true);
@@ -91,7 +92,17 @@ export default function LoginOTPScreen() {
         }
         setErrorMsg(null);
         try {
-            await loginOtp(contact, code);
+            // 👇 Grab the OneSignal Token safely
+            let pushSubscriptionId = null;
+            try {
+                pushSubscriptionId = await OneSignal.User.pushSubscription.getIdAsync();
+            } catch (oneSignalErr) {
+                console.warn("Could not get OneSignal Token:", oneSignalErr);
+            }
+
+            // 👇 Pass the token into your login function!
+            await loginOtp(contact, code, pushSubscriptionId); 
+            
         } catch (err: any) {
             setHasError(true);
             setErrorMsg(err?.message ?? "Invalid OTP. Please try again.");
