@@ -17,6 +17,9 @@ import {
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+// 🚨 NEW: Import OneSignal
+import { LogLevel, OneSignal } from 'react-native-onesignal';
+
 const { height } = Dimensions.get("window");
 
 export default function LoginScreen() {
@@ -36,8 +39,23 @@ export default function LoginScreen() {
         if (!email.trim() || !password.trim()) return;
         clearError();
         try {
-            await login({ email: email.trim().toLowerCase(), password });
-        } catch {}
+            // 🚨 SAFETY NET: Wrap OneSignal in a try/catch so it never breaks login
+            let pushSubscriptionId = null;
+            try {
+                pushSubscriptionId = await OneSignal.User.pushSubscription.getIdAsync();
+            } catch (oneSignalErr) {
+                console.warn("Could not get OneSignal Token:", oneSignalErr);
+            }
+
+            await login({ 
+                email: email.trim().toLowerCase(), 
+                password,
+                device_token: pushSubscriptionId 
+            });
+            
+        } catch (err) {
+            console.error("Login error:", err);
+        }
     };
 
     const handleOTPLogin = () => {
@@ -220,7 +238,7 @@ const styles = StyleSheet.create({
         justifyContent: "center",
         alignItems: "center",
     },
-   
+    
     card: {
         flex: 1,
         width: "100%",
@@ -274,10 +292,6 @@ const styles = StyleSheet.create({
         marginBottom: 12,
     },
     otpButton: {
-        // backgroundColor: "transparent",
-        // borderRadius: 16,
-       
-        // borderWidth: 1.5,
         justifyContent: "center",
         alignItems: "center",
     },

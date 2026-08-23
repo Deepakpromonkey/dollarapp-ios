@@ -459,7 +459,7 @@ function PhotoCapture({
                                 Photo Captured
                             </AppText>
                         </View>
-                        {extractedText ? (
+                        {/* {extractedText ? (
                             <AppText
                                 variant="tiny"
                                 numberOfLines={2}
@@ -476,7 +476,15 @@ function PhotoCapture({
                                 style={{ color: theme.secondaryText }}>
                                 Tap retake to redo
                             </AppText>
-                        )}
+                        )} */}
+
+                        <AppText
+    variant="tiny"
+    style={{ color: theme.secondaryText }}>
+    Tap retake to redo
+</AppText>
+
+
                     </View>
                     <Pressable
                         onPress={onRetake}

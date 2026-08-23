@@ -1,4 +1,5 @@
 import { CaptureResult } from "@/components/LiveCamera";
+import { LogLevel, OneSignal } from 'react-native-onesignal';
 import Step1Phone from "@/components/signup/Step1Phone";
 import Step2PhoneOTP from "@/components/signup/Step2PhoneOTP";
 import Step3Profile from "@/components/signup/Step3Profile";
@@ -75,6 +76,9 @@ export default function SignupScreen() {
  
     const handleComplete = async (diditSessionId: string) => {
         try {
+            // 🚨 NEW: Get the OneSignal Device Token (Subscription ID)
+            const pushSubscriptionId = await OneSignal.User.pushSubscription.getIdAsync();
+
             const formData = new FormData();
             formData.append("registration_token", data.registrationToken ?? "");
             formData.append("name", data.fullName ?? "");
@@ -82,6 +86,11 @@ export default function SignupScreen() {
             formData.append("email", data.email ?? "");
             formData.append("password", data.password ?? "");
             formData.append("didit_session_id", diditSessionId);
+
+            // 🚨 NEW: Append the device token to the API payload!
+            if (pushSubscriptionId) {
+                formData.append("device_token", pushSubscriptionId);
+            }
 
             if (data.cdlFront?.uri) {
                 const uri = await compressImage(data.cdlFront.uri);
@@ -98,22 +107,21 @@ export default function SignupScreen() {
             console.log("[Signup] Sending registration:", {
                 registration_token: data.registrationToken,
                 name: data.fullName,
-                carrier_name: data.carrier,
                 email: data.email,
                 didit_session_id: diditSessionId,
+                device_token: pushSubscriptionId ?? "missing", // Log the token to terminal!
                 cdl_front: data.cdlFront?.uri ? "present" : "missing",
                 cdl_back: data.cdlBack?.uri ? "present" : "missing",
             });
 
             const { data: tokens } = await authApi.completeRegistration(formData);
+            
+            // 🚨 NEW: Tell OneSignal to link this driver's backend ID to this phone!
+            OneSignal.login(tokens.driver.id.toString());
+
             await saveSession(tokens.token, toStoredDriver(tokens.driver));
             await hydrateFromSession();
 
-            /*
-             * The account is real either way — an undecided Didit session is not a
-             * failed one — but the driver should hear that their check is still
-             * open rather than discover it later from a blocked action.
-             */
             if (tokens.liveness_status === "in_review") {
                 Alert.alert(
                     "Identity check under review",
