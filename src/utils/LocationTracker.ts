@@ -8,7 +8,8 @@ import { getAccessToken } from "@/lib/secureStore";
 const LOCATION_TASK_NAME = "BACKGROUND_LOCATION_TASK";
 const LOCATION_QUEUE_KEY = "@offline_location_queue";
 const ACTIVE_SHIPMENT_KEY = "@active_shipment_uuid";
-const WAKE_STAMP_KEY = "@last_task_wake"; 
+const WAKE_STAMP_KEY = "@last_task_wake";
+const LAST_PING_SENT_KEY = "@last_ping_sent_timestamp";
 
 /*
 | Pings go to the same API as everything else. This used to be a hardcoded
@@ -20,8 +21,8 @@ const LOCATION_PING_URL = `${BASE_URL}/driver/location-ping`;
 // Helper to extract interval from any response structure
 const extractInterval = (result: any): number | null => {
   if (!result) return null;
-  
-  const val = 
+
+  const val =
     result.data?.interval_seconds ??
     result.data?.ping_interval ??
     result.data?.tracking_interval ??
@@ -31,8 +32,11 @@ const extractInterval = (result: any): number | null => {
     result.tracking_interval ??
     result.interval;
 
-  return val ? parseInt(val) : null;
+  return val ? parseInt(val, 10) : null;
 };
+
+let lastTaskFireTime = 0;
+let instantMemoryLock = 0;
 
 TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (error) {
@@ -40,47 +44,58 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     return;
   }
 
-  // 🚨 THE BLACK BOX DIARY STAMP
-  // Every single time this task wakes up, write down the exact timestamp.
-  // This happens instantly, even if there is zero internet.
-  await AsyncStorage.setItem(WAKE_STAMP_KEY, Date.now().toString());
+  const now = Date.now();
 
-  if (data) {
-    const { locations } = data as any;
-    const location = locations[0];
+  if (now - lastTaskFireTime < 5000) {
+      return; 
+  }
+  lastTaskFireTime = now;
 
-    if (location) {
-      // 🚨 ASK THE PHONE FOR PROOF
-      // We check if they still have "Always Allow" enabled in the background
-      const bgPerm = await Location.getBackgroundPermissionsAsync();
+  try {
+    await AsyncStorage.setItem(WAKE_STAMP_KEY, now.toString());
 
-      const newPing = {
-        lat: location.coords.latitude,
-        lng: location.coords.longitude,
-        accuracy: location.coords.accuracy,
-        device_timestamp: Date.now(),
-        // 🚨 ATTACH THE PROOF TO THE PAYLOAD
-        // mocked checks if they are using a fake GPS app.
-        // bg_permission checks if they took away tracking rights.
-        is_mocked: location.mocked ?? false,
-        bg_permission: bgPerm.status === "granted",
-      };
+    if (data) {
+      const { locations } = data as any;
+      const location = locations?.[0];
 
-      console.log(
-        `\n[DollarTraq Tracker] 📡 GPS Wakeup at ${new Date().toLocaleTimeString()}`
-      );
-      console.log(
-        `[DollarTraq Tracker] 📍 Captured coordinates: Lat ${newPing.lat}, Lng ${newPing.lng} | Mocked: ${newPing.is_mocked} | BG Perm: ${newPing.bg_permission}`
-      );
+      if (location) {
+        const currentIntervalStr = await AsyncStorage.getItem("trackingInterval");
+        const activeInterval = currentIntervalStr ? parseInt(currentIntervalStr, 10) : 300;
 
-      try {
+        const lastSentStr = await AsyncStorage.getItem(LAST_PING_SENT_KEY);
+        const dbLastSent = lastSentStr ? parseInt(lastSentStr, 10) : 0;
+        
+        const effectiveLastSent = Math.max(instantMemoryLock, dbLastSent);
+        const secondsSinceLastSent = (now - effectiveLastSent) / 1000;
+
+        if (effectiveLastSent > 0 && secondsSinceLastSent < activeInterval - 5) {
+          console.log(`[DollarTraq Tracker] ⏳ Throttled: ${secondsSinceLastSent.toFixed(1)}s elapsed.`);
+          return; 
+        }
+
+        instantMemoryLock = now;
+        await AsyncStorage.setItem(LAST_PING_SENT_KEY, now.toString());
+
+        const bgPerm = await Location.getBackgroundPermissionsAsync();
+
+        const newPing = {
+          lat: location.coords.latitude,
+          lng: location.coords.longitude,
+          accuracy: location.coords.accuracy,
+          device_timestamp: now,
+          is_mocked: location.mocked ?? false,
+          bg_permission: bgPerm.status === "granted",
+        };
+
+        console.log(`\n======================================================`);
+        console.log(`[DollarTraq Tracker] ⏱️ TARGET INTERVAL HIT (${secondsSinceLastSent.toFixed(1)}s). Initiating location transmission.`);
+        console.log(`[DollarTraq Tracker] 📍 Lat ${newPing.lat}, Lng ${newPing.lng} | Mocked: ${newPing.is_mocked} | BG Perm: ${newPing.bg_permission}`);
+
         const token = await getAccessToken();
         const shipmentUuid = await AsyncStorage.getItem(ACTIVE_SHIPMENT_KEY);
 
         if (!token || !shipmentUuid) {
-          console.warn(
-            `[DollarTraq Tracker] ⏸️ Skipped ping: Token missing (${!!token}) or Shipment UUID missing (${!!shipmentUuid})`
-          );
+          console.warn(`[DollarTraq Tracker] ⏸️ Skipped ping: Token missing or Shipment UUID missing`);
           return;
         }
 
@@ -88,9 +103,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         let locationQueue = storedQueue ? JSON.parse(storedQueue) : [];
         locationQueue.push(newPing);
 
-        console.log(
-          `[DollarTraq Tracker] 🚀 Sending ${locationQueue.length} location(s) to server...`
-        );
+        console.log(`[DollarTraq Tracker] 🚀 Sending ${locationQueue.length} location(s) to server...`);
 
         const response = await fetch(LOCATION_PING_URL, {
           method: "POST",
@@ -107,61 +120,46 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         });
 
         if (response.ok) {
-          console.log(
-            `[DollarTraq Tracker] ✅ SUCCESS! Server accepted ${locationQueue.length} location(s).`
-          );
+          console.log(`[DollarTraq Tracker] ✅ SUCCESS! Server accepted ${locationQueue.length} location(s).`);
           await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);
 
           const result = await response.json();
           const newInterval = extractInterval(result);
 
-          const currentIntervalStr = await AsyncStorage.getItem("trackingInterval");
-          const currentInterval = currentIntervalStr ? parseInt(currentIntervalStr) : 300;
-
-          if (newInterval && newInterval !== currentInterval) {
-            console.log(
-              `[DollarTraq Tracker] 🔄 Broker updated interval to ${newInterval}s. Restarting tracker...`
-            );
+          if (newInterval && newInterval !== activeInterval) {
+            console.log(`[DollarTraq Tracker] 🔄 Broker updated interval from ${activeInterval}s to ${newInterval}s! Re-configuring...`);
             await AsyncStorage.setItem("trackingInterval", newInterval.toString());
             startLocationTracking(shipmentUuid, newInterval);
           }
         } else if (response.status === 403) {
-          console.warn(
-            `[DollarTraq Tracker] 🛑 403 Forbidden: Tracking window hasn't opened yet. Wiping local queue.`
-          );
+          console.warn(`[DollarTraq Tracker] 🛑 403 Forbidden. Wiping local queue.`);
           await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);
         } else {
-          const errText = await response.text();
-          console.warn(
-            `[DollarTraq Tracker] ⚠️ Server Error Status ${response.status}: ${errText}`
-          );
-          await AsyncStorage.setItem(
-            LOCATION_QUEUE_KEY,
-            JSON.stringify(locationQueue)
-          );
+          console.warn(`[DollarTraq Tracker] ⚠️ Server Error Status ${response.status}`);
+          await AsyncStorage.setItem(LOCATION_QUEUE_KEY, JSON.stringify(locationQueue));
         }
-      } catch (err) {
-        console.warn(
-          `[DollarTraq Tracker] 📶 NETWORK ERROR/OFFLINE: Saving ping locally.`,
-          err
-        );
-        const storedQueue = await AsyncStorage.getItem(LOCATION_QUEUE_KEY);
-        let locationQueue = storedQueue ? JSON.parse(storedQueue) : [];
-
-        if (
-          !locationQueue.find(
-            (p: any) => p.device_timestamp === newPing.device_timestamp
-          )
-        ) {
-          locationQueue.push(newPing);
-        }
-
-        await AsyncStorage.setItem(
-          LOCATION_QUEUE_KEY,
-          JSON.stringify(locationQueue)
-        );
       }
     }
+  } catch (err) {
+    console.warn(`[DollarTraq Tracker] 📶 NETWORK ERROR/OFFLINE: Storing ping locally.`, err);
+    const storedQueue = await AsyncStorage.getItem(LOCATION_QUEUE_KEY);
+    let locationQueue = storedQueue ? JSON.parse(storedQueue) : [];
+    
+    if (data) { 
+        const { locations } = data as any;
+        if (locations?.[0]) {
+             locationQueue.push({
+                 lat: locations[0].coords.latitude,
+                 lng: locations[0].coords.longitude,
+                 accuracy: locations[0].coords.accuracy,
+                 device_timestamp: Date.now(),
+                 is_mocked: locations[0].mocked ?? false,
+                 bg_permission: true 
+             });
+        }
+    }
+
+    await AsyncStorage.setItem(LOCATION_QUEUE_KEY, JSON.stringify(locationQueue));
   }
 });
 
@@ -169,60 +167,53 @@ export const startLocationTracking = async (
   shipmentUuid: string,
   intervalSeconds?: number
 ) => {
-  /*
-   * An interval passed by the caller is the freshest thing available and wins.
-   * The cache is the fallback for a cold start — it keeps a restart from
-   * dropping to five minutes before the first ping can report the broker's real
-   * setting — but it used to outrank the argument, so the restart triggered by a
-   * broker change re-armed the tracker at the very rate it was replacing.
-   */
-  const savedIntervalStr = await AsyncStorage.getItem("trackingInterval");
-  let activeInterval =
-    intervalSeconds ??
-    (savedIntervalStr ? parseInt(savedIntervalStr, 10) : 300);
 
-  console.log(
-    `\n[DollarTraq Tracker] 🟢 INITIATING TRACKING for Shipment: ${shipmentUuid} at ${activeInterval}s intervals`
-  );
+  const hasStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+  const currentActive = await AsyncStorage.getItem(ACTIVE_SHIPMENT_KEY);
+
+  if (hasStarted && currentActive === shipmentUuid) {
+    console.log(`[DollarTraq Tracker] 🛡️ Shield activated: Tracker is already running for ${shipmentUuid}. Ignoring duplicate start request.`);
+    return; 
+  }
+
+
+  const savedIntervalStr = await AsyncStorage.getItem("trackingInterval");
+  let activeInterval = intervalSeconds ?? (savedIntervalStr ? parseInt(savedIntervalStr, 10) : 300);
+
+  console.log(`\n[DollarTraq Tracker] 🟢 INITIATING TRACKING for Shipment: ${shipmentUuid} at ${activeInterval}s intervals`);
   await AsyncStorage.setItem(ACTIVE_SHIPMENT_KEY, shipmentUuid);
 
-  const { status: foregroundStatus } =
-    await Location.requestForegroundPermissionsAsync();
+  const { status: foregroundStatus } = await Location.requestForegroundPermissionsAsync();
   if (foregroundStatus !== "granted") {
     console.error("[DollarTraq Tracker] ❌ Foreground permission denied.");
     return;
   }
 
-  const { status: backgroundStatus } =
-    await Location.requestBackgroundPermissionsAsync();
-  // if (backgroundStatus !== "granted") {
-  //   console.error("[DollarTraq Tracker] ❌ Background permission denied.");
-  //   return;
-  // }
-
+  const { status: backgroundStatus } = await Location.requestBackgroundPermissionsAsync();
   if (backgroundStatus !== "granted") {
     console.error("[DollarTraq Tracker] ❌ Background permission denied.");
-    
-    // 🚨 FIRE THE FLARE TO THE SERVER BEFORE ABORTING!
-   // 🚨 FIRE THE FLARE TO THE SERVER BEFORE ABORTING!
-      const token = await getAccessToken();
-      const shipmentUuid = await AsyncStorage.getItem(ACTIVE_SHIPMENT_KEY);
 
-      if (token && shipmentUuid) {
-        console.log("[DollarTraq Tracker] 🚀 Firing alert flare to server...");
-        
-        fetch(LOCATION_PING_URL, {
-            method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({
-                shipment_uuid: shipmentUuid,
-                locations: [{ lat: 0, lng: 0, device_timestamp: Date.now(), bg_permission: false }]
-            }),
-        })
+    // 🚨 FIRE THE FLARE TO THE SERVER BEFORE ABORTING
+    const token = await getAccessToken();
+    const activeShipment = await AsyncStorage.getItem(ACTIVE_SHIPMENT_KEY);
+
+    if (token && activeShipment) {
+      console.log("[DollarTraq Tracker] 🚀 Firing alert flare to server...");
+      fetch(LOCATION_PING_URL, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          shipment_uuid: activeShipment,
+          locations: [{ lat: 0, lng: 0, device_timestamp: Date.now(), bg_permission: false }],
+        }),
+      })
         .then(async (res) => console.log("[DollarTraq Tracker] 🎯 Flare Response:", await res.text()))
         .catch((err) => console.error("[DollarTraq Tracker] ⚠️ Flare Error:", err));
-      }
-
+    }
     return;
   }
 
@@ -236,13 +227,10 @@ export const startLocationTracking = async (
     const token = await getAccessToken();
 
     if (!token) {
-      console.error(
-        "[DollarTraq Tracker] ❌ Auth token not found via getAccessToken!"
-      );
+      console.error("[DollarTraq Tracker] ❌ Auth token not found via getAccessToken!");
     } else {
       console.log("[DollarTraq Tracker] 🔑 Auth token found successfully.");
-      
-      // 🚨 Ask for permission proof on the very first ping too
+
       const bgPerm = await Location.getBackgroundPermissionsAsync();
 
       const response = await fetch(LOCATION_PING_URL, {
@@ -261,15 +249,17 @@ export const startLocationTracking = async (
               lng: initialLoc.coords.longitude,
               accuracy: initialLoc.coords.accuracy,
               device_timestamp: Date.now(),
-              // 🚨 Send the proof on the initial ping
               is_mocked: initialLoc.mocked ?? false,
-              bg_permission: bgPerm.status === "granted"
+              bg_permission: bgPerm.status === "granted",
             },
           ],
         }),
       });
 
       if (response.ok) {
+        // Mark Initial Sent Time
+        await AsyncStorage.setItem(LAST_PING_SENT_KEY, Date.now().toString());
+
         const result = await response.json();
         console.log("[DollarTraq Tracker] ✅ Initial ping successful!");
         console.log("[DollarTraq Tracker] 📦 Server Response Payload:", JSON.stringify(result));
@@ -277,21 +267,18 @@ export const startLocationTracking = async (
         const newInterval = extractInterval(result);
 
         if (newInterval && newInterval !== activeInterval) {
-          console.log(
-            `[DollarTraq Tracker] 🔄 Broker configured new interval: ${newInterval}s`
-          );
+          console.log(`[DollarTraq Tracker] 🔄 Broker configured new interval: ${newInterval}s`);
           await AsyncStorage.setItem("trackingInterval", newInterval.toString());
           activeInterval = newInterval;
         } else if (!newInterval) {
           console.warn(
-            "[DollarTraq Tracker] ⚠️ No interval key returned by server in ping response. Defaulting to active interval:", activeInterval
+            "[DollarTraq Tracker] ⚠️ No interval key returned by server in ping response. Defaulting to active interval:",
+            activeInterval
           );
         }
       } else {
         const resText = await response.text();
-        console.warn(
-          `[DollarTraq Tracker] ⚠️ Initial ping rejected. Status: ${response.status} - ${resText}`
-        );
+        console.warn(`[DollarTraq Tracker] ⚠️ Initial ping rejected. Status: ${response.status} - ${resText}`);
       }
     }
   } catch (err) {
@@ -311,21 +298,9 @@ export const startLocationTracking = async (
     },
   });
 
-  console.log(
-    `[DollarTraq Tracker] 🏃‍♂️ Background Task Registered running at ${activeInterval}s intervals.`
-  );
+  console.log(`[DollarTraq Tracker] 🏃‍♂️ Background Task Registered running at ${activeInterval}s intervals.`);
 };
 
-/**
- * Sends anything still sitting in the offline queue.
- *
- * Called before tracking is torn down. Without it, a driver who finished the
- * trip while out of signal had their queued pings deleted by the cleanup below
- * — the one moment the queue exists for.
- *
- * Best effort by design: if it fails the queue is left alone, so the next
- * successful ping carries it instead.
- */
 const flushPendingLocations = async (): Promise<boolean> => {
   const storedQueue = await AsyncStorage.getItem(LOCATION_QUEUE_KEY);
   const locationQueue = storedQueue ? JSON.parse(storedQueue) : [];
@@ -338,9 +313,7 @@ const flushPendingLocations = async (): Promise<boolean> => {
   if (!token || !shipmentUuid) return false;
 
   try {
-    console.log(
-      `[DollarTraq Tracker] 📤 Flushing ${locationQueue.length} queued location(s) before stopping...`
-    );
+    console.log(`[DollarTraq Tracker] 📤 Flushing ${locationQueue.length} queued location(s) before stopping...`);
 
     const response = await fetch(LOCATION_PING_URL, {
       method: "POST",
@@ -355,16 +328,12 @@ const flushPendingLocations = async (): Promise<boolean> => {
       }),
     });
 
-    // A 403 means the tracking window is closed, so these will never be
-    // accepted — dropping them is correct, not a loss.
     if (response.ok || response.status === 403) {
       await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);
       return true;
     }
 
-    console.warn(
-      `[DollarTraq Tracker] ⚠️ Flush rejected (${response.status}); keeping queue for next attempt.`
-    );
+    console.warn(`[DollarTraq Tracker] ⚠️ Flush rejected (${response.status}); keeping queue for next attempt.`);
     return false;
   } catch (err) {
     console.warn("[DollarTraq Tracker] 📶 Flush failed, keeping queue.", err);
@@ -373,11 +342,9 @@ const flushPendingLocations = async (): Promise<boolean> => {
 };
 
 export const stopLocationTracking = async () => {
-  console.log(
-    `\n[DollarTraq Tracker] 🔴 STOPPING TRACKING. Cleaning up active tasks...`
-  );
-  const hasStarted =
-    await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+  console.log(`\n[DollarTraq Tracker] 🔴 STOPPING TRACKING. Cleaning up active tasks...`);
+  const hasStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+
   if (hasStarted) {
     await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
     console.log("[DollarTraq Tracker] ✅ Background task terminated.");
@@ -387,8 +354,8 @@ export const stopLocationTracking = async () => {
 
   await AsyncStorage.removeItem(ACTIVE_SHIPMENT_KEY);
   await AsyncStorage.removeItem("trackingInterval");
-
-  await AsyncStorage.removeItem(WAKE_STAMP_KEY); 
+  await AsyncStorage.removeItem(WAKE_STAMP_KEY);
+  await AsyncStorage.removeItem(LAST_PING_SENT_KEY);
 
   if (flushed) {
     await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);

@@ -84,7 +84,9 @@ export default function TripScreen() {
   const theme = useAppTheme();
   const [mapFullscreen, setMapFullscreen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+
   const bottomSheetRef = useRef<BottomSheet>(null);
+  const trackingLockRef = useRef<string | null>(null);
 
   const snapPoints = useMemo(() => ["30%", "40%", "92%"], []);
 
@@ -146,16 +148,29 @@ export default function TripScreen() {
 
   const isJourneyCompleted = activeIndex >= 5;
 
-  // ------------------------------------------------------------------
+
+
+
+// ------------------------------------------------------------------
   // 1. STANDARD TRACKING TRIGGER (Runs on load changes)
   // ------------------------------------------------------------------
   useEffect(() => {
+    if (loading || journeyLoading) return;
+
     if (shipment && !isJourneyCompleted) {
-      startLocationTracking(shipment.uuid);
+
+      if (trackingLockRef.current !== shipment.uuid) {
+        trackingLockRef.current = shipment.uuid;
+        startLocationTracking(shipment.uuid);
+      }
     } else if (!shipment || isJourneyCompleted) {
-      stopLocationTracking();
+
+      if (trackingLockRef.current !== null) {
+        trackingLockRef.current = null;
+        stopLocationTracking();
+      }
     }
-  }, [shipment?.uuid, isJourneyCompleted]);
+  }, [shipment?.uuid, isJourneyCompleted, loading, journeyLoading]);
 
   // ------------------------------------------------------------------
   // 2. THE SILENT RESTARTER & PERMISSION ENFORCER (Runs on app open)
@@ -166,13 +181,13 @@ export default function TripScreen() {
     const subscription = AppState.addEventListener("change", async (nextAppState) => {
       if (appState.current.match(/inactive|background/) && nextAppState === "active") {
         
-        // Only care if there is an active shipment and trip is not completed
+        if (loading || journeyLoading) return;
+
         if (shipment?.uuid && !isJourneyCompleted) {
           const bgPerm = await ExpoLocation.getBackgroundPermissionsAsync();
           const isRunning = await ExpoLocation.hasStartedLocationUpdatesAsync("BACKGROUND_LOCATION_TASK").catch(() => false);
 
           if (bgPerm.status !== "granted") {
-            // THE WALL: Driver changed permission in settings. Block them.
             Alert.alert(
               "Tracking Disabled",
               "You must set location to 'Always Allow' to continue driving this active load.",
@@ -181,8 +196,9 @@ export default function TripScreen() {
               ]
             );
           } else if (!isRunning) {
-            // QUIET REBOOT: App was swiped up, but permissions are still good. Turn it back on silently.
             console.log("[TripScreen] 🤫 App restarted. Quietly rebooting tracker...");
+            
+            trackingLockRef.current = shipment.uuid; 
             startLocationTracking(shipment.uuid);
           }
         }
@@ -193,8 +209,13 @@ export default function TripScreen() {
     return () => {
       subscription.remove();
     };
-  }, [shipment?.uuid, isJourneyCompleted]);
-  // ------------------------------------------------------------------
+  }, [shipment?.uuid, isJourneyCompleted, loading, journeyLoading]);
+
+
+
+
+
+
 
   const steps: TripStep[] = STEPS_CONFIG.map((s, i) => ({
     ...s,
