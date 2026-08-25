@@ -9,8 +9,8 @@ import axios, {
 import { clearSession, getAccessToken } from "./secureStore";
 
  
-export const BASE_URL = "https://driverapi.dollartraq.com/api";
-// export const BASE_URL = "https://mobility-twitter-tameness.ngrok-free.dev/api";
+// export const BASE_URL = "https://driverapi.dollartraq.com/api";
+export const BASE_URL = "https://mobility-twitter-tameness.ngrok-free.dev/api";
 
 export class ApiError extends Error {
   constructor(
