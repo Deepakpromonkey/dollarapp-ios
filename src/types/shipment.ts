@@ -81,6 +81,16 @@ export interface Shipment {
     driver_type: string;
     team_load: number;
     tracking_start_at: string;
+
+    /*
+    | How often the broker wants this load to report, in seconds. Set per
+    | shipment rather than per driver, and changeable while the load runs, so
+    | the app treats every value it sees as the current instruction rather than
+    | something read once at start. Absent on older API builds, in which case
+    | the tracker falls back to its 300s default.
+    */
+    tracking_interval_seconds?: number;
+
     notes: string;
     status: "Active" | "Upcoming" | "Past" | string;
 

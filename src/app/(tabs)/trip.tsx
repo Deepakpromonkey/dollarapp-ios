@@ -2,23 +2,21 @@ import AppText from "@/components/AppText";
 import LoadDrawer from "@/components/LoadDrawer";
 import LoadHeader from "@/components/LoadHeader";
 import TripMapView, { TripWaypoint } from "@/components/TripMapView";
-import ArrivedReceiverStep from "@/components/tripsteps/ArrivedReceiverStep";
 import ArrivedShipperStep from "@/components/tripsteps/ArrivedShipperStep";
-import DeliveredReceiverStep from "@/components/tripsteps/DeliveredReceiverStep";
-import DestinationArrivalStep from "@/components/tripsteps/DestinationArrivalStep";
-import LoadedShipperStep from "@/components/tripsteps/LoadedShipperStep";
 import StepTimeline from "@/components/tripsteps/StepTimeline";
 import StopActionCard from "@/components/tripsteps/StopActionCard";
 import TripCard from "@/components/tripsteps/TripCard";
 import { TripStep, TripStepId } from "@/components/tripsteps/types";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useJourney } from "@/hooks/useJourney";
-import { useLocationTracking } from "@/hooks/useLocationTracking";
 import { useShipments } from "@/hooks/useShipments";
 import { useStopProgress } from "@/hooks/useStopProgress";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import BottomSheet, { BottomSheetScrollView } from "@gorhom/bottom-sheet";
+import LocationAlertBanner from "@/components/LocationAlertBanner";
+import { useLocationHealth } from "@/hooks/useLocationHealth";
 import {
+  ensureTrackingRunning,
   startLocationTracking,
   stopLocationTracking,
 } from "@/utils/LocationTracker";
@@ -34,8 +32,6 @@ import {
   StyleSheet,
   View,
   AppState,
-  Alert,
-  Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { isEquipmentVerifiedLocally } from "../trip/equipment-verification";
@@ -152,70 +148,84 @@ export default function TripScreen() {
 
 
 // ------------------------------------------------------------------
-  // 1. STANDARD TRACKING TRIGGER (Runs on load changes)
+  // Tracking lifecycle
   // ------------------------------------------------------------------
+
+  /*
+  | The broker's reporting rate rides on the shipment, so hand it to the tracker
+  | up front. Without it the first interval of every load ran at whatever rate
+  | the previous load happened to leave behind.
+  */
+  const trackingInterval = shipment?.tracking_interval_seconds;
+
+  /*
+  | Keyed on rate as well as load. Keying on the uuid alone meant a broker who
+  | changed the interval mid-load could not have it picked up until the driver
+  | was assigned a different shipment.
+  */
+  const trackingKey =
+    shipment && !isJourneyCompleted
+      ? `${shipment.uuid}:${trackingInterval ?? "default"}`
+      : null;
+
   useEffect(() => {
     if (loading || journeyLoading) return;
 
-    if (shipment && !isJourneyCompleted) {
-
-      if (trackingLockRef.current !== shipment.uuid) {
-        trackingLockRef.current = shipment.uuid;
-        startLocationTracking(shipment.uuid);
+    if (trackingKey && shipment) {
+      if (trackingLockRef.current !== trackingKey) {
+        trackingLockRef.current = trackingKey;
+        startLocationTracking(shipment.uuid, trackingInterval).catch((err) =>
+          console.warn("[TripScreen] Could not start tracking:", err),
+        );
       }
-    } else if (!shipment || isJourneyCompleted) {
-
-      if (trackingLockRef.current !== null) {
-        trackingLockRef.current = null;
-        stopLocationTracking();
-      }
+    } else if (trackingLockRef.current !== null) {
+      trackingLockRef.current = null;
+      stopLocationTracking().catch((err) =>
+        console.warn("[TripScreen] Could not stop tracking:", err),
+      );
     }
-  }, [shipment?.uuid, isJourneyCompleted, loading, journeyLoading]);
+  }, [trackingKey, shipment?.uuid, trackingInterval, loading, journeyLoading]);
 
-  // ------------------------------------------------------------------
-  // 2. THE SILENT RESTARTER & PERMISSION ENFORCER (Runs on app open)
-  // ------------------------------------------------------------------
   const appState = useRef(AppState.currentState);
 
   useEffect(() => {
-    const subscription = AppState.addEventListener("change", async (nextAppState) => {
-      if (appState.current.match(/inactive|background/) && nextAppState === "active") {
-        
-        if (loading || journeyLoading) return;
+    const subscription = AppState.addEventListener("change", (nextAppState) => {
+      const returningToForeground =
+        !!appState.current.match(/inactive|background/) && nextAppState === "active";
 
-        if (shipment?.uuid && !isJourneyCompleted) {
-          const bgPerm = await ExpoLocation.getBackgroundPermissionsAsync();
-          const isRunning = await ExpoLocation.hasStartedLocationUpdatesAsync("BACKGROUND_LOCATION_TASK").catch(() => false);
-
-          if (bgPerm.status !== "granted") {
-            Alert.alert(
-              "Tracking Disabled",
-              "You must set location to 'Always Allow' to continue driving this active load.",
-              [
-                { text: "Open Settings", onPress: () => Linking.openSettings() }
-              ]
-            );
-          } else if (!isRunning) {
-            console.log("[TripScreen] 🤫 App restarted. Quietly rebooting tracker...");
-            
-            trackingLockRef.current = shipment.uuid; 
-            startLocationTracking(shipment.uuid);
-          }
-        }
-      }
+      /*
+      | Recorded before the work below rather than after it. The old handler was
+      | async and returned early while shipments were still loading, so this
+      | assignment was skipped and the ref kept saying "background" — after
+      | which no later foreground was ever recognised as one.
+      */
       appState.current = nextAppState;
+
+      if (!returningToForeground) return;
+      if (loading || journeyLoading) return;
+      if (!shipment?.uuid || isJourneyCompleted) return;
+
+      /*
+      | The process may have been killed while backgrounded, leaving the stored
+      | load with no task behind it. Permission and location-services problems
+      | are not handled here — the health monitor owns those, and raises them in
+      | the banner and a notification instead of the undismissable modal that
+      | used to greet the driver on every single app open.
+      */
+      ensureTrackingRunning(shipment.uuid, trackingInterval).catch((err) =>
+        console.warn("[TripScreen] Could not resume tracking:", err),
+      );
     });
 
     return () => {
       subscription.remove();
     };
-  }, [shipment?.uuid, isJourneyCompleted, loading, journeyLoading]);
+  }, [shipment?.uuid, trackingInterval, isJourneyCompleted, loading, journeyLoading]);
 
-
-
-
-
-
+  /** Watches for location being switched off or the permission being revoked. */
+  const locationHealth = useLocationHealth(
+    shipment && !isJourneyCompleted ? shipment.uuid : null,
+  );
 
   const steps: TripStep[] = STEPS_CONFIG.map((s, i) => ({
     ...s,
@@ -254,34 +264,56 @@ export default function TripScreen() {
 
   useEffect(() => {
     let sub: ExpoLocation.LocationSubscription | null = null;
+    let cancelled = false;
 
     (async () => {
-      const { status } = await ExpoLocation.requestForegroundPermissionsAsync();
-      if (status !== ExpoLocation.PermissionStatus.GRANTED) return;
+      try {
+        const { status } = await ExpoLocation.requestForegroundPermissionsAsync();
+        if (cancelled || status !== ExpoLocation.PermissionStatus.GRANTED) return;
 
-      const initial = await ExpoLocation.getCurrentPositionAsync({
-        accuracy: ExpoLocation.Accuracy.Balanced,
-      });
-      setUserLocation({
-        latitude: initial.coords.latitude,
-        longitude: initial.coords.longitude,
-      });
-
-      sub = await ExpoLocation.watchPositionAsync(
-        {
+        const initial = await ExpoLocation.getCurrentPositionAsync({
           accuracy: ExpoLocation.Accuracy.Balanced,
-          timeInterval: 5000,
-          distanceInterval: 10,
-        },
-        (loc: ExpoLocation.LocationObject) =>
-          setUserLocation({
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-          }),
-      );
+        });
+        if (cancelled) return;
+
+        setUserLocation({
+          latitude: initial.coords.latitude,
+          longitude: initial.coords.longitude,
+        });
+
+        const watch = await ExpoLocation.watchPositionAsync(
+          {
+            accuracy: ExpoLocation.Accuracy.Balanced,
+            timeInterval: 5000,
+            distanceInterval: 10,
+          },
+          (loc: ExpoLocation.LocationObject) =>
+            setUserLocation({
+              latitude: loc.coords.latitude,
+              longitude: loc.coords.longitude,
+            }),
+        );
+
+        /*
+        | Three awaits stand between mount and this line, so the screen can be
+        | gone by now. Cleanup would have run against a still-null `sub` and the
+        | watcher it never saw would keep firing for the life of the process.
+        */
+        if (cancelled) {
+          watch.remove();
+          return;
+        }
+
+        sub = watch;
+      } catch (err) {
+        // Throws when location is off entirely. The map simply has no blue dot;
+        // the health monitor is what tells the driver about it.
+        console.warn("[TripScreen] Could not watch position:", err);
+      }
     })();
 
     return () => {
+      cancelled = true;
       sub?.remove();
     };
   }, []);
@@ -327,6 +359,17 @@ export default function TripScreen() {
           onNotificationPress={() => {}}
         />
       </SafeAreaView>
+
+      <View style={styles.bannerWrap} pointerEvents="box-none">
+        <LocationAlertBanner
+          visible={!!shipment && locationHealth.degraded}
+          blocking={locationHealth.blocking}
+          title={locationHealth.title}
+          body={locationHealth.body}
+          actionLabel={locationHealth.actionLabel}
+          onPressAction={locationHealth.resolve}
+        />
+      </View>
 
       <View style={styles.mapContainer}>
         <TripMapView
@@ -703,6 +746,10 @@ export default function TripScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   headerWrap: {
+    zIndex: 10,
+  },
+  // Above the absolutely-positioned map, which would otherwise paint over it.
+  bannerWrap: {
     zIndex: 10,
   },
   mapContainer: {

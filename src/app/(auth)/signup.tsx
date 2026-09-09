@@ -1,5 +1,5 @@
 import { CaptureResult } from "@/components/LiveCamera";
-import { LogLevel, OneSignal } from 'react-native-onesignal';
+import { OneSignal } from 'react-native-onesignal';
 import Step1Phone from "@/components/signup/Step1Phone";
 import Step2PhoneOTP from "@/components/signup/Step2PhoneOTP";
 import Step3Profile from "@/components/signup/Step3Profile";

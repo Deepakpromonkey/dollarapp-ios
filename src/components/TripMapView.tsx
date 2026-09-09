@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Linking,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -16,6 +17,17 @@ import MapView, {
   Polyline,
   PROVIDER_GOOGLE
 } from 'react-native-maps';
+
+/*
+| Android renders through Google Maps; iOS renders through Apple Maps.
+|
+| Passing PROVIDER_GOOGLE on iOS pulls in the Google Maps iOS SDK, which needs
+| its own billed, iOS-restricted API key. Without one the map view still mounts
+| but draws nothing, so the driver sees a blank rectangle where the route
+| should be. `undefined` selects the platform default — MapKit — which needs no
+| key and supports every marker and polyline this screen draws.
+*/
+const MAP_PROVIDER = Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined;
 
 
 export interface TripWaypoint {
@@ -163,7 +175,7 @@ export default function TripMapView({
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFill}
-        provider={PROVIDER_GOOGLE}
+        provider={MAP_PROVIDER}
         initialRegion={initialRegion}
         onMapReady={handleMapReady}
         showsUserLocation={

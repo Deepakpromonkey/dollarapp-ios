@@ -270,7 +270,8 @@ export default function EquipmentVerificationScreen() {
                 <View style={styles.stepSection}>
                     <AppText variant="tiny" style={styles.stepLabel}>
                         STEP 2 · TRACTOR PHOTO
-                    </AppText>                    <PhotoCapture
+                    </AppText>
+                    <PhotoCapture
                         cardBg={cardBg}
                         isDark={isDark}
                         label="Tractor"
