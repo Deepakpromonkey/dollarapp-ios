@@ -3,7 +3,7 @@
     "name": "DollarTraq",
     "slug": "DollarTraq",
     "owner": "promonkey-dev",
-    "version": "1.0.0",
+    "version": "1.5.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "dollartraq",
