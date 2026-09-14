@@ -69,6 +69,30 @@ function LiveCamera({
 
     const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
+    /*
+    | Go straight to the system prompt the first time, showing nothing of our
+    | own beforehand.
+    |
+    | App Review rejected the previous flow under guideline 5.1.1(iv): a custom
+    | screen stood in front of the OS dialog with a "Grant Camera Access"
+    | button and a "Not now" that dismissed it, letting the driver defer the
+    | request indefinitely. Apple requires that a user who sees an explanation
+    | always goes on to the real prompt.
+    |
+    | Opening the camera is itself the driver asking to take a photo, so the
+    | prompt needs no preamble. The explanatory screen below now renders only
+    | after a denial, which is the case Apple's guidance explicitly allows.
+    */
+    const hasRequestedCamera = useRef(false);
+
+    useEffect(() => {
+        if (!cameraPermission || hasRequestedCamera.current) return;
+        if (cameraPermission.status !== "undetermined") return;
+
+        hasRequestedCamera.current = true;
+        requestCameraPermission();
+    }, [cameraPermission, requestCameraPermission]);
+
     const [facing, setFacing] = useState<CameraType>("back");
     const [capturing, setCapturing] = useState(false);
     const cameraRef = useRef<CameraView>(null);
@@ -154,7 +178,7 @@ function LiveCamera({
         }
     };
 
-    if (!cameraPermission) {
+    if (!cameraPermission || cameraPermission.status === "undetermined") {
         return (
             <View
                 style={[
@@ -226,7 +250,7 @@ function LiveCamera({
                         ]}>
                         {hardDenied
                             ? "Camera Access Blocked"
-                            : "Allow Camera Access"}
+                            : "Camera Access Needed"}
                     </AppText>
 
                     <AppText
@@ -237,7 +261,7 @@ function LiveCamera({
                         ]}>
                         {hardDenied
                             ? "Camera access was permanently denied. Enable it from your device Settings to continue."
-                            : "DollarTraq needs camera access to capture live verification photos with location stamps."}
+                            : "Verification photos cannot be captured without camera access. Tap Continue to allow it."}
                     </AppText>
 
                     <Pressable
@@ -254,9 +278,7 @@ function LiveCamera({
                         <AppText
                             variant="label"
                             style={{ color: "#fff", fontWeight: "600" }}>
-                            {hardDenied
-                                ? "Open Settings"
-                                : "Grant Camera Access"}
+                            {hardDenied ? "Open Settings" : "Continue"}
                         </AppText>
                     </Pressable>
 
@@ -267,7 +289,7 @@ function LiveCamera({
                             <AppText
                                 variant="caption"
                                 style={{ color: theme.secondaryText }}>
-                                Not now
+                                Go back
                             </AppText>
                         </Pressable>
                     )}
