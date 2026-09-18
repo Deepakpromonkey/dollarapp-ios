@@ -11,6 +11,9 @@ import { getAccessToken } from "@/lib/secureStore";
 
 export const LOCATION_TASK_NAME = "BACKGROUND_LOCATION_TASK";
 
+/** Geofence crossings for the stops on the active load. */
+export const GEOFENCE_TASK_NAME = "BACKGROUND_ARRIVAL_GEOFENCE_TASK";
+
 export const KEYS = {
   /** Pings that could not be delivered yet, oldest first. */
   QUEUE: "@offline_location_queue",
@@ -41,6 +44,26 @@ export const KEYS = {
   LAST_HEALTH_NOTIFIED_AT: "@last_location_health_notified_at",
   /** "1" while an OS-scheduled repeating warning is armed. */
   HEALTH_REPEAT_ARMED: "@location_health_repeat_armed",
+  /*
+  | Stop id -> label for the geofences currently being monitored.
+  |
+  | The geofence task is woken by the OS with only a region identifier, in a
+  | process that may have just been started from cold with no shipment loaded.
+  | Without this it could tell the driver they had arrived somewhere but not
+  | where, so the labels are written when the fences are registered.
+  */
+  GEOFENCE_STOPS: "@arrival_geofence_stops",
+  /** Stop ids already announced on this load, so an arrival is alerted once. */
+  GEOFENCE_NOTIFIED: "@arrival_geofence_notified",
+  /*
+  | The load those announcements belong to.
+  |
+  | Without it the announced-set could only be cleared on teardown, and a
+  | driver moving straight from one load to the next never passes through it.
+  | Clearing on every start instead would re-announce a stop the driver has
+  | already checked into every time the app restarts mid-load.
+  */
+  GEOFENCE_SHIPMENT: "@arrival_geofence_shipment",
 } as const;
 
 export const LOCATION_PING_URL = `${BASE_URL}/driver/location-ping`;
@@ -65,6 +88,23 @@ export const REQUEST_TIMEOUT_MS = 20000;
 | is worth more to a broker than where the truck was nine hours ago.
 */
 export const MAX_QUEUED_PINGS = 500;
+
+/*
+| How close counts as arrived.
+|
+| Matches the 500m the trip screen already uses to enable the Arrive button,
+| so the notification and the button agree. Much tighter and a large yard or a
+| poor urban fix stops the crossing firing at all; much looser and the driver
+| is told they have arrived while still on the interstate.
+*/
+export const ARRIVAL_RADIUS_METERS = 500;
+
+/*
+| iOS monitors at most 20 regions per app and silently drops the rest, so a
+| long multi-stop load has to be truncated rather than left to fail. Stops are
+| taken in order, which keeps the ones the driver reaches first.
+*/
+export const MAX_GEOFENCE_REGIONS = 20;
 
 export function clampInterval(seconds: number): number {
   return Math.min(MAX_INTERVAL_SECONDS, Math.max(MIN_INTERVAL_SECONDS, Math.round(seconds)));

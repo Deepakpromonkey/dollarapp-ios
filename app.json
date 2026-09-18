@@ -11,9 +11,9 @@
     "ios": {
       "icon": "./assets/images/icon-ios.png",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "DollarTraq uses your location to show your position on the trip map.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "DollarTraq tracks your location in the background to record trip progress.",
-        "NSLocationAlwaysUsageDescription": "DollarTraq tracks your location in the background to record trip progress.",
+        "NSLocationWhenInUseUsageDescription": "DollarTraq uses your location to show your position on the trip map and to confirm you have reached a stop.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "DollarTraq alerts you when you arrive at a pickup or delivery stop, even when the app is closed, and shares trip progress with your carrier while a load is active.",
+        "NSLocationAlwaysUsageDescription": "DollarTraq alerts you when you arrive at a pickup or delivery stop, even when the app is closed, and shares trip progress with your carrier while a load is active.",
         "UIBackgroundModes": [
           "location",
           "remote-notification"
@@ -107,10 +107,11 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "DollarTraq needs location access to track your trip in background.",
-          "locationAlwaysPermission": "DollarTraq tracks your location in the background to record trip progress.",
+          "locationAlwaysAndWhenInUsePermission": "DollarTraq alerts you when you arrive at a pickup or delivery stop, even when the app is closed, and shares trip progress with your carrier while a load is active.",
+          "locationAlwaysPermission": "DollarTraq alerts you when you arrive at a pickup or delivery stop, even when the app is closed, and shares trip progress with your carrier while a load is active.",
           "isIosBackgroundLocationEnabled": true,
-          "isAndroidBackgroundLocationEnabled": true
+          "isAndroidBackgroundLocationEnabled": true,
+          "locationWhenInUsePermission": "DollarTraq uses your location to show your position on the trip map and to confirm you have reached a stop."
         }
       ],
       [

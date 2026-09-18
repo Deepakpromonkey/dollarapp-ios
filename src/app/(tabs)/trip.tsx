@@ -15,6 +15,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import BottomSheet, { BottomSheetScrollView } from "@gorhom/bottom-sheet";
 import LocationAlertBanner from "@/components/LocationAlertBanner";
 import { useLocationHealth } from "@/hooks/useLocationHealth";
+import { startArrivalAlerts, stopArrivalAlerts } from "@/utils/arrivalAlerts";
 import {
   ensureTrackingRunning,
   startLocationTracking,
@@ -177,11 +178,24 @@ export default function TripScreen() {
         startLocationTracking(shipment.uuid, trackingInterval).catch((err) =>
           console.warn("[TripScreen] Could not start tracking:", err),
         );
+
+        /*
+        | Arrival alerts follow the same load lifecycle but are kept on their
+        | own call deliberately: they are for the driver, position reporting is
+        | for the broker, and a load whose stops have no coordinates must lose
+        | the notifications without losing the tracking.
+        */
+        startArrivalAlerts(shipment.uuid, shipment.stops ?? []).catch((err) =>
+          console.warn("[TripScreen] Could not start arrival alerts:", err),
+        );
       }
     } else if (trackingLockRef.current !== null) {
       trackingLockRef.current = null;
       stopLocationTracking().catch((err) =>
         console.warn("[TripScreen] Could not stop tracking:", err),
+      );
+      stopArrivalAlerts().catch((err) =>
+        console.warn("[TripScreen] Could not stop arrival alerts:", err),
       );
     }
   }, [trackingKey, shipment?.uuid, trackingInterval, loading, journeyLoading]);

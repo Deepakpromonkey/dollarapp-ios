@@ -1,5 +1,12 @@
 import "react-native-gesture-handler";
 import "@/utils/LocationTracker";
+/*
+| Imported for its side effect, like the tracker above. The OS can wake the
+| app on a geofence crossing from cold, and the task has to already be defined
+| when it does — registering it from the trip screen would be too late, since
+| that screen has not mounted yet.
+*/
+import "@/utils/arrivalAlerts";
 
 import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
