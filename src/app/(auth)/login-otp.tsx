@@ -1,4 +1,4 @@
-import { LogLevel, OneSignal } from 'react-native-onesignal';
+import { OneSignal } from 'react-native-onesignal';
 import AppButton from "@/components/AppButton";
 import AppInput from "@/components/AppInput";
 import AppText from "@/components/AppText";

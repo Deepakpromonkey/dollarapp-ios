@@ -1,5 +1,12 @@
 import "react-native-gesture-handler";
 import "@/utils/LocationTracker";
+/*
+| Imported for its side effect, like the tracker above. The OS can wake the
+| app on a geofence crossing from cold, and the task has to already be defined
+| when it does — registering it from the trip screen would be too late, since
+| that screen has not mounted yet.
+*/
+import "@/utils/arrivalAlerts";
 
 import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
@@ -10,10 +17,12 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { ThemeProvider, useThemeContext } from "@/context/ThemeContext";
-// import '../utils/LocationTracker';
+import {
+    configureNotificationHandler,
+    ensureNotificationPermission,
+} from "@/utils/localNotifications";
 
-// 🚨 NEW: Import OneSignal
-import { LogLevel, OneSignal } from 'react-native-onesignal';
+import { OneSignal } from 'react-native-onesignal';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -36,10 +45,20 @@ function AppNavigator() {
 }
 
 export default function RootLayout() {
-    // 🚨 NEW: Turn on OneSignal the moment the app boots!
     useEffect(() => {
-        OneSignal.initialize("093cd863-0342-4491-a75e-61e728e7d542"); 
+        OneSignal.initialize("093cd863-0342-4491-a75e-61e728e7d542");
         OneSignal.Notifications.requestPermission(true);
+
+        /*
+        | Local notifications are what tell a driver their location has been
+        | switched off. They share the OS-level permission OneSignal just asked
+        | for, so this normally resolves without a second prompt — but the
+        | handler has to be installed either way or anything raised while the
+        | app is open is dropped silently, which is precisely when a driver is
+        | most likely to be toggling the setting.
+        */
+        configureNotificationHandler();
+        ensureNotificationPermission().catch(() => {});
     }, []);
 
     const [fontsLoaded, fontError] = useFonts({
