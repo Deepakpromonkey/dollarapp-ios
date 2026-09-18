@@ -3,9 +3,7 @@ import * as Location from 'expo-location';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Linking,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -238,32 +236,23 @@ export default function TripMapView({
             {canAskAgain ? 'Location Access Needed' : 'Location Access Blocked'}
           </Text>
           <Text style={[styles.permissionDesc, { color: theme.secondaryText }]}>
-            {canAskAgain
-              ? 'Allow location access to show your position on the map.'
-              : 'Location access was permanently denied. Enable it from Settings to see your position on the map.'}
+            {'Location access is off, so your position is not shown on the map. ' +
+              'The route and stops below are unaffected.'}
           </Text>
-          <Pressable
-            onPress={
-              canAskAgain
-                ? async () => {
-                    const { status, canAskAgain: askable } =
-                      await Location.requestForegroundPermissionsAsync();
-                    setPermissionStatus(status);
-                    setCanAskAgain(askable);
-                    if (status === Location.PermissionStatus.GRANTED) {
-                      setLocationError(null);
-                    }
-                  }
-                : () => Linking.openSettings()
-            }
-            style={({ pressed }: { pressed: boolean }) => [
-              styles.permissionBtn,
-              { backgroundColor: theme.primaryButton, opacity: pressed ? 0.85 : 1 },
-            ]}>
-            <Text style={styles.permissionBtnText}>
-              {canAskAgain ? 'Grant Location Access' : 'Open Settings'}
-            </Text>
-          </Pressable>
+          {/*
+            | No button here, deliberately.
+            |
+            | This card used to offer "Grant Location Access", which re-issued
+            | the permission request, or "Open Settings", which sent the driver
+            | out to enable it. Both appeared immediately after the driver
+            | declined, and App Review rejected that under guideline 5.1.1(iv)
+            | — pressing a user to revisit a permission they just refused does
+            | not respect the refusal.
+            |
+            | The card now only states what the consequence is. A driver who
+            | changes their mind can grant access in Settings themselves; the
+            | app does not ask twice.
+          */}
         </View>
       )}
     </View>

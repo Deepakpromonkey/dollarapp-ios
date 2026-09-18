@@ -9,7 +9,7 @@ import {
   LOCATION_PING_URL,
   parseStoredInterval,
 } from "./locationConfig";
-import { cancelAlert, presentLocalAlert, scheduleRepeatingAlert } from "./localNotifications";
+import { cancelAlert, presentLocalAlert } from "./localNotifications";
 
 /*
 | Noticing when the driver stops being trackable.
@@ -284,33 +284,34 @@ export async function syncLocationHealth(
 
     const now = Date.now();
     const degraded = isDegraded(snapshot.state);
-    const { state: lastState, reportedAt, notifiedAt } = await readLastReport();
+    const { state: lastState, reportedAt } = await readLastReport();
     const changed = lastState !== snapshot.state;
 
     /*
-    | Arm or disarm the OS-scheduled repeat before anything else, and do it on
-    | every pass rather than only on the ones that report — the driver may have
-    | fixed the problem during a stretch where nothing else was due.
+    | No repeating alert is ever armed.
+    |
+    | This used to schedule an OS repeat that re-fired every NOTIFY_INTERVAL_MS
+    | for as long as location stayed off, so a driver who denied the permission
+    | was prompted about it every five minutes indefinitely. App Review
+    | rejected that under guideline 5.1.1(iv): asking a user to reconsider a
+    | permission they have already declined does not respect their decision.
+    |
+    | The driver is now told once, on the transition into a degraded state, and
+    | then left alone. The banner on the trip screen remains for anyone who
+    | wants to act on it, and the server still hears about the state on its own
+    | cadence — that reporting is not driver-facing and is unaffected.
+    |
+    | The disarm is kept: an install upgrading from a build that armed the
+    | repeat still has one scheduled with the OS, and it has to be cancelled or
+    | it would outlive the code that created it.
     */
-    let repeatArmed = (await AsyncStorage.getItem(KEYS.HEALTH_REPEAT_ARMED)) === "1";
+    const legacyRepeatArmed = (await AsyncStorage.getItem(KEYS.HEALTH_REPEAT_ARMED)) === "1";
 
-    if (degraded && !repeatArmed && !options.silent) {
-      const { title, body } = describeHealth(snapshot.state);
-      const armed = await scheduleRepeatingAlert({
-        identifier: REPEAT_ALERT_ID,
-        title,
-        body,
-        seconds: NOTIFY_INTERVAL_MS / 1000,
-        data: { type: "location_health", state: snapshot.state, shipment_uuid: uuid },
-      });
-
-      if (armed) {
-        await AsyncStorage.setItem(KEYS.HEALTH_REPEAT_ARMED, "1");
-        repeatArmed = true;
-      }
-    } else if (!degraded && repeatArmed) {
+    if (legacyRepeatArmed) {
       await clearLocationHealthAlerts();
-      repeatArmed = false;
+      await AsyncStorage.removeItem(KEYS.HEALTH_REPEAT_ARMED);
+    } else if (!degraded) {
+      await clearLocationHealthAlerts();
     }
 
     const shouldReport =
@@ -322,10 +323,11 @@ export async function syncLocationHealth(
     | driver with the app open two notifications per cycle. The time-based arm
     | is kept purely as a fallback for when scheduling failed.
     */
-    const shouldNotify =
-      !options.silent &&
-      degraded &&
-      (changed || (!repeatArmed && now - notifiedAt >= NOTIFY_INTERVAL_MS));
+    /*
+    | Only on the transition into a degraded state: one notification per
+    | problem, never a reminder. See the note above on guideline 5.1.1(iv).
+    */
+    const shouldNotify = !options.silent && degraded && changed;
 
     if (!shouldReport && !shouldNotify) return snapshot;
 
