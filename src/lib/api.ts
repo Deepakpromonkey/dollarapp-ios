@@ -214,7 +214,7 @@ export interface Driver {
   phone_verified: boolean;
   email_verified_at: string | null;
   liveness_verified: boolean;
-  liveness_status: "approved" | "in_review" | "declined" | "pending";
+  liveness_status: "approved" | "in_review" | "declined" | "pending" | "skipped";
   cdl_number: string | null;
   cdl_state: string | null;
   cdl_expiration: string | null;
@@ -241,7 +241,7 @@ export interface AuthTokens {
    * has not decided the identity check yet — the verdict reaches the backend by
    * webhook, not by anything the app can wait on here.
    */
-  liveness_status?: "approved" | "in_review" | "declined";
+  liveness_status?: "approved" | "in_review" | "declined" | "skipped";
   message?: string;
 }
 export interface SignupPayload {

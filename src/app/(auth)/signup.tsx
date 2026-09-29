@@ -1,5 +1,5 @@
 import { CaptureResult } from "@/components/LiveCamera";
-import { OneSignal } from 'react-native-onesignal';
+import { LogLevel, OneSignal } from 'react-native-onesignal';
 import Step1Phone from "@/components/signup/Step1Phone";
 import Step2PhoneOTP from "@/components/signup/Step2PhoneOTP";
 import Step3Profile from "@/components/signup/Step3Profile";
@@ -127,6 +127,12 @@ export default function SignupScreen() {
                     "Identity check under review",
                     tokens.message ??
                         "Your account is ready, but your identity check needs a manual look. We will notify you as soon as it clears.",
+                );
+            } else if (tokens.liveness_status === "skipped") {
+                Alert.alert(
+                    "Identity check skipped",
+                    tokens.message ??
+                        "Your account is ready. You can complete identity verification anytime from your profile.",
                 );
             }
         } catch (err: unknown) {
