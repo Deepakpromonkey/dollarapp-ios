@@ -24,7 +24,7 @@ export interface StoredDriver {
     carrier_name: string | null;
     phone_verified: boolean;
     liveness_verified: boolean;
-    liveness_status: "approved" | "in_review" | "declined" | "pending";
+    liveness_status: "approved" | "in_review" | "declined" | "pending" | "skipped";
     status: string;
 }
 

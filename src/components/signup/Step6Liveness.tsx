@@ -22,7 +22,7 @@ interface Step6LivenessProps {
     onComplete: (diditSessionId: string) => void;
 }
  
-type LivenessState = "intro" | "loading" | "done" | "review" | "error";
+type LivenessState = "intro" | "loading" | "done" | "review" | "skipped" | "error";
 
 /*
  * What the backend accepts, in local only, to skip the Didit call entirely.
@@ -39,7 +39,18 @@ export default function Step6Liveness({
  
     const [uiState, setUiState] = useState<LivenessState>("intro");
     const [errorMessage, setErrorMessage] = useState<string>("");
- 
+
+    /*
+     * Skipping sends no session id at all — the backend treats a blank
+     * `didit_session_id` as the driver's own choice to finish identity
+     * verification later, and creates the account with `liveness_status:
+     * "skipped"` instead of failing the request.
+     */
+    const handleSkip = () => {
+        setUiState("skipped");
+        onComplete("");
+    };
+
     const handleStart = async () => {
         setUiState("loading");
         try {
@@ -137,6 +148,29 @@ export default function Step6Liveness({
         );
     }
  
+    if (uiState === "skipped") {
+        return (
+            <View style={[styles.resultContainer, { backgroundColor: theme.background }]}>
+                <MaterialCommunityIcons
+                    name="clock-outline"
+                    size={64}
+                    color={theme.secondaryText}
+                />
+                <AppText
+                    variant="title"
+                    style={{ color: theme.text, textAlign: "center", marginTop: 20 }}>
+                    Identity check skipped
+                </AppText>
+                <AppText
+                    variant="label1"
+                    style={{ color: theme.secondaryText, textAlign: "center", marginTop: 8, paddingHorizontal: 24 }}>
+                    Completing registration… You can verify your identity anytime
+                    from your profile.
+                </AppText>
+            </View>
+        );
+    }
+
     if (uiState === "review") {
         return (
             <View style={[styles.resultContainer, { backgroundColor: theme.background }]}>
@@ -262,12 +296,19 @@ export default function Step6Liveness({
                         style={styles.primaryButton}
                     />
 
+                    <AppButton
+                        title="Skip for now"
+                        variant="secondary"
+                        onPress={handleSkip}
+                        style={styles.skipButton}
+                    />
+
                     {/*
                       * Development only. The backend honours this session id in
                       * `local` alone, so a build that somehow shipped the button
                       * would get a 422 rather than an unverified account.
-                      */}
-                    {__DEV__ && (
+                      */} 
+                    {/* {__DEV__ && (
                         <AppButton
                             title="Skip liveness (dev)"
                             variant="secondary"
@@ -277,7 +318,7 @@ export default function Step6Liveness({
                             }}
                             style={styles.devButton}
                         />
-                    )}
+                    )} */}
                 </View>
             </KeyboardAwareScrollView>
         </View>
@@ -352,6 +393,11 @@ const styles = StyleSheet.create({
         borderRadius: 16,
         marginBottom: 24,
         marginTop: 12,
+        width: "100%",
+    },
+    skipButton: {
+        borderRadius: 16,
+        marginBottom: 24,
         width: "100%",
     },
     devButton: {

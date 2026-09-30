@@ -32,7 +32,7 @@ export interface AuthUser {
     carrierName: string | null;
     phoneVerified: boolean;
     livenessVerified: boolean;
-    livenessStatus: "approved" | "in_review" | "declined" | "pending";
+    livenessStatus: "approved" | "in_review" | "declined" | "pending" | "skipped";
     status: string;
 }
 
