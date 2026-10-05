@@ -31,6 +31,7 @@ export default function StopActionCard({
   const theme = useAppTheme();
 
   const [busy, setBusy] = useState(false);
+  const [locationIssue, setLocationIssue] = useState<"foreground" | "background" | null>(null);
   const [otp, setOtp] = useState<string[]>(Array(OTP_LENGTH).fill(""));
   const [otpError, setOtpError] = useState(false);
   const [seal, setSeal] = useState("");
@@ -68,32 +69,20 @@ export default function StopActionCard({
 
   const arrive = async () => {
     setBusy(true);
+    setLocationIssue(null);
     try {
       const fgPermission = await Location.requestForegroundPermissionsAsync();
       if (!fgPermission.granted) {
-        Alert.alert(
-          "Location needed",
-          "We need your location to mark arrival so the broker can see you reached this stop.",
-          [
-            { text: "Cancel", style: "cancel" },
-            { text: "Open Settings", onPress: () => Linking.openSettings() },
-          ],
-        );
-        setBusy(false);
+        // Apple's 5.1.1(iv) review guidance: a denial is final. No alert, no
+        // automatic redirect to Settings — just a static message the driver
+        // can act on, or not, on their own time.
+        setLocationIssue("foreground");
         return;
       }
 
       const bgPermission = await Location.requestBackgroundPermissionsAsync();
       if (!bgPermission.granted) {
-        Alert.alert(
-          "Background Tracking Required",
-          "To mark arrival and start this trip, you must set location access to 'Allow all the time'.",
-          [
-            { text: "Cancel", style: "cancel" },
-            { text: "Open Settings", onPress: () => Linking.openSettings() },
-          ],
-        );
-        setBusy(false);
+        setLocationIssue("background");
         return;
       }
 
@@ -249,6 +238,21 @@ export default function StopActionCard({
                 loading={busy}
                 style={styles.action}
               />
+              {locationIssue && (
+                <View style={{ marginTop: 10 }}>
+                  <AppText variant="caption" style={{ color: theme.err }}>
+                    {locationIssue === "foreground"
+                      ? "Location access is required to mark arrival. Enable it in Settings to continue."
+                      : 'Location access set to "Always" is required to mark arrival and track this trip. Enable it in Settings to continue.'}
+                  </AppText>
+                  <AppButton
+                    title="Open Settings"
+                    variant="secondary"
+                    onPress={() => Linking.openSettings()}
+                    style={styles.action}
+                  />
+                </View>
+              )}
             </>
           ) : (
             <>
