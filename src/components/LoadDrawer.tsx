@@ -1,8 +1,11 @@
 import AppText from "@/components/AppText";
+import { Fonts } from "@/constants/fonts";
+import { useNotifications } from "@/context/NotificationsContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { goToTab } from "@/utils/notificationRouting";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { router, usePathname } from "expo-router";
-import { useEffect, useRef } from "react";
+import { router, usePathname, type Href } from "expo-router";
+import { useEffect, useState } from "react";
 import {
     Animated,
     Dimensions,
@@ -17,6 +20,12 @@ import { useAuth } from "@/context/AuthContext";
 
 const DRAWER_WIDTH = Dimensions.get("window").width * 0.78;
 
+/*
+| theme.err is an 8-digit colour, so appending an alpha to it gave an invalid
+| one and the Log Out icon sat on no background at all.
+*/
+const DESTRUCTIVE_TINT = "#EF4444";
+
 interface DrawerItem {
     id: string;
     icon: keyof typeof MaterialCommunityIcons.glyphMap;
@@ -24,6 +33,8 @@ interface DrawerItem {
     route?: string;
     onPress: () => void;
     destructive?: boolean;
+    /** A count shown at the end of the row, e.g. unread notifications. */
+    count?: number;
 }
 
 interface LoadDrawerProps {
@@ -35,10 +46,12 @@ export default function LoadDrawer({ visible, onClose }: LoadDrawerProps) {
     const theme = useAppTheme();
     const insets = useSafeAreaInsets();
     const pathname = usePathname();
-    const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
-    const backdropAnim = useRef(new Animated.Value(0)).current;
+    // Created once, like refs, but readable while rendering.
+    const [slideAnim] = useState(() => new Animated.Value(-DRAWER_WIDTH));
+    const [backdropAnim] = useState(() => new Animated.Value(0));
 
     const { logout } = useAuth();
+    const { unreadCount } = useNotifications();
 
     useEffect(() => {
         if (visible) {
@@ -69,8 +82,13 @@ export default function LoadDrawer({ visible, onClose }: LoadDrawerProps) {
                 }),
             ]).start();
         }
-    }, [visible]);
+    }, [visible, slideAnim, backdropAnim]);
 
+    /*
+    | The tabs are switched with goToTab rather than pushed: this drawer also
+    | opens from screens stacked above the tabs (My Equipment), where a push
+    | mounted a second tab bar on top of the first.
+    */
     const navItems: DrawerItem[] = [
         {
             id: "loads",
@@ -78,7 +96,7 @@ export default function LoadDrawer({ visible, onClose }: LoadDrawerProps) {
             label: "Loads",
             route: "/loads",
             onPress: () => {
-                router.push("/(tabs)/loads");
+                goToTab("loads");
                 onClose();
             },
         },
@@ -88,7 +106,18 @@ export default function LoadDrawer({ visible, onClose }: LoadDrawerProps) {
             label: "My Trip",
             route: "/trip",
             onPress: () => {
-                router.push("/(tabs)/trip");
+                goToTab("trip");
+                onClose();
+            },
+        },
+        {
+            id: "notifications",
+            icon: "bell-outline",
+            label: "Notifications",
+            route: "/notifications",
+            count: unreadCount,
+            onPress: () => {
+                router.navigate("/notifications" as Href);
                 onClose();
             },
         },
@@ -98,7 +127,7 @@ export default function LoadDrawer({ visible, onClose }: LoadDrawerProps) {
             label: "Profile",
             route: "/profile",
             onPress: () => {
-                router.push("/(tabs)/profile");
+                goToTab("profile");
                 onClose();
             },
         },
@@ -110,8 +139,8 @@ export default function LoadDrawer({ visible, onClose }: LoadDrawerProps) {
             icon: "logout",
             label: "Log Out",
             onPress: async () => {
-                await logout();
                 onClose();
+                await logout();
             },
             destructive: true,
         },
@@ -236,6 +265,8 @@ function DrawerNavItem({
         ? theme.primaryButton
         : theme.text;
     const iconColor = item.destructive ? theme.err : theme.primaryButton;
+    const tint = item.destructive ? DESTRUCTIVE_TINT : theme.primaryButton;
+    const count = item.count ?? 0;
 
     return (
         <Pressable
@@ -248,7 +279,7 @@ function DrawerNavItem({
             <View
                 style={[
                     styles.navIconWrap,
-                    { backgroundColor: iconColor + (isActive ? "30" : "18") },
+                    { backgroundColor: tint + (isActive ? "30" : "18") },
                 ]}>
                 <MaterialCommunityIcons
                     name={item.icon}
@@ -261,8 +292,21 @@ function DrawerNavItem({
                 style={{ color, fontWeight: isActive ? "700" : "500" }}>
                 {item.label}
             </AppText>
+            {count > 0 && (
+                <View style={styles.countBadge}>
+                    <AppText variant="tiny" style={styles.countText}>
+                        {count > 99 ? "99+" : String(count)}
+                    </AppText>
+                </View>
+            )}
             {isActive && (
-                <View style={[styles.activeIndicator, { backgroundColor: theme.primaryButton }]} />
+                <View
+                    style={[
+                        styles.activeIndicator,
+                        count > 0 && { marginLeft: 8 },
+                        { backgroundColor: theme.primaryButton },
+                    ]}
+                />
             )}
         </Pressable>
     );
@@ -321,5 +365,22 @@ const styles = StyleSheet.create({
         width: 4,
         height: 20,
         borderRadius: 2,
+    },
+    countBadge: {
+        marginLeft: "auto",
+        minWidth: 22,
+        height: 22,
+        paddingHorizontal: 6,
+        borderRadius: 11,
+        backgroundColor: DESTRUCTIVE_TINT,
+        justifyContent: "center",
+        alignItems: "center",
+    },
+    countText: {
+        color: "#FFFFFF",
+        fontFamily: Fonts.bold,
+        fontSize: 11,
+        lineHeight: 14,
+        includeFontPadding: false,
     },
 });

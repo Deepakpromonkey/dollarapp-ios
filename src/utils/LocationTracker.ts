@@ -19,6 +19,7 @@ import {
   resetHealthReporting,
   syncLocationHealth,
 } from "./locationHealth";
+import { getPositionWithin } from "./currentPosition";
 
 /*
 | Background position reporting for an active load.
@@ -146,8 +147,9 @@ async function flushQueue(shipmentUuid: string): Promise<FlushResult> {
       return { delivered: true, body: result.body };
     }
 
-    if (result.status === 403) {
-      console.warn("[DollarTraq Tracker] 403 for this load — discarding its queued pings.");
+    // 403: no longer this driver's load. 404: the load is gone. Neither will ever take them.
+    if (result.status === 403 || result.status === 404) {
+      console.warn(`[DollarTraq Tracker] ${result.status} for this load — discarding its queued pings.`);
       await AsyncStorage.removeItem(KEYS.QUEUE);
       return { delivered: false, body: result.body };
     }
@@ -394,13 +396,14 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
  *
  * @param shipmentUuid    the load to attribute pings to
  * @param intervalSeconds the broker's reporting rate, when the caller knows it
+ * @returns true when location updates are registered for the load
  */
 export const startLocationTracking = async (
   shipmentUuid: string,
   intervalSeconds?: number,
-): Promise<void> =>
+): Promise<boolean> =>
   serialize(async () => {
-    if (!shipmentUuid) return;
+    if (!shipmentUuid) return false;
 
     const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).catch(
       () => false,
@@ -417,11 +420,11 @@ export const startLocationTracking = async (
     | correct, and so on.
     */
     const serverHasSpoken = activeUuid === shipmentUuid && applied !== null;
-    let interval = clampInterval(serverHasSpoken ? stored : (intervalSeconds ?? stored));
+    const interval = clampInterval(serverHasSpoken ? stored : (intervalSeconds ?? stored));
 
     // Nothing to do only when the load *and* the rate both already match. The
     // old guard checked the load alone, which is why interval changes stuck.
-    if (running && activeUuid === shipmentUuid && applied === interval) return;
+    if (running && activeUuid === shipmentUuid && applied === interval) return true;
 
     /*
     | Switching loads: drain what is still queued while the old uuid is the one
@@ -444,7 +447,7 @@ export const startLocationTracking = async (
     if (foreground.status !== Location.PermissionStatus.GRANTED) {
       console.error("[DollarTraq Tracker] Foreground permission denied.");
       await syncLocationHealth(shipmentUuid, { force: true });
-      return;
+      return false;
     }
 
     const background = await Location.requestBackgroundPermissionsAsync();
@@ -455,37 +458,68 @@ export const startLocationTracking = async (
       | Background updates cannot be registered, but foreground permission is
       | granted, so one position can still be taken right now. The broker gets
       | the truck's location at load start plus an explicit flag saying why
-      | nothing will follow it.
+      | nothing will follow it. Not awaited: a fix and a round trip must not
+      | hold up the chain.
       */
-      await sendImmediatePing(shipmentUuid).catch(() => {});
+      sendImmediatePing(shipmentUuid, { flare: true }).catch(() => {});
       await syncLocationHealth(shipmentUuid, { force: true });
-      return;
+      return false;
     }
 
-    // An immediate ping means the broker sees the load move the moment it is
-    // accepted, rather than after one whole interval of silence. It is also the
-    // first chance to learn the rate this particular broker wants.
-    const body = await sendImmediatePing(shipmentUuid).catch(() => null);
-    const fromServer = extractInterval(body);
-    if (fromServer) {
-      interval = fromServer;
-      await AsyncStorage.setItem(KEYS.DESIRED_INTERVAL, interval.toString());
-      console.log(`[DollarTraq Tracker] Broker specified ${interval}s.`);
+    /*
+    | Registered before the first ping, never after it. The ping can wait 10 s
+    | for a fix and 20 s for the server, and a driver who left the app in that
+    | time was left with that one ping and no updates behind it, so the server
+    | soon reported "GPS Signal Lost" for a load that was fine.
+    */
+    try {
+      await registerUpdates(interval);
+    } catch (err) {
+      console.warn("[DollarTraq Tracker] Could not register location updates:", err);
+      return false;
     }
-
-    await registerUpdates(interval);
     await syncLocationHealth(shipmentUuid, { force: true, silent: true });
+
+    /*
+    | An immediate ping means the broker sees the load move the moment it is
+    | accepted, rather than after one whole interval of silence. It is also the
+    | first chance to learn the rate this broker wants, which comes back
+    | through applyBrokerInterval. Sent beside the chain, never awaited inside
+    | it: applyBrokerInterval queues behind this operation, so the two would
+    | wait on each other for good.
+    */
+    sendFirstPing(shipmentUuid).catch(() => {});
+    return true;
   });
+
+async function sendFirstPing(shipmentUuid: string): Promise<void> {
+  const body = await sendImmediatePing(shipmentUuid);
+  if (body) await adoptIntervalFrom(body, shipmentUuid);
+}
 
 /**
  * Take a fix now and deliver it along with anything queued.
  *
+ * With `flare`, the ping exists to tell the server the permission state now
+ * (bg_permission false), so it is dated now: its fix may be one the phone
+ * already held, older than the load's start, which the server discards.
+ *
  * @returns the response body, so the caller can read a broker interval from it.
  */
-async function sendImmediatePing(shipmentUuid: string): Promise<unknown> {
-  const location = await Location.getCurrentPositionAsync({
-    accuracy: Location.Accuracy.Balanced,
-  });
+async function sendImmediatePing(
+  shipmentUuid: string,
+  { flare = false }: { flare?: boolean } = {},
+): Promise<unknown> {
+  const location = await getPositionWithin(Location.Accuracy.Balanced);
+
+  // Never a made-up position: without a fix there is nothing to send.
+  if (!location) {
+    console.warn("[DollarTraq Tracker] No fix for the immediate ping; the first interval will send one.");
+    return null;
+  }
+
+  // A stop, or a different load, can land while the fix is being taken.
+  if ((await AsyncStorage.getItem(KEYS.ACTIVE_SHIPMENT)) !== shipmentUuid) return null;
 
   const health = await inspectLocationHealth();
 
@@ -495,13 +529,15 @@ async function sendImmediatePing(shipmentUuid: string): Promise<unknown> {
     accuracy: location.coords.accuracy,
     speed: location.coords.speed,
     heading: location.coords.heading,
-    device_timestamp: location.timestamp || Date.now(),
+    device_timestamp: flare ? Date.now() : location.timestamp || Date.now(),
     is_mocked: location.mocked ?? false,
     bg_permission: health.backgroundGranted,
     services_enabled: health.servicesEnabled,
   });
 
-  await AsyncStorage.setItem(KEYS.LAST_PING_ATTEMPT, Date.now().toString());
+  if ((await AsyncStorage.getItem(KEYS.ACTIVE_SHIPMENT)) === shipmentUuid) {
+    await AsyncStorage.setItem(KEYS.LAST_PING_ATTEMPT, Date.now().toString());
+  }
 
   const { delivered, body } = await flushQueue(shipmentUuid);
   return delivered ? body : null;
@@ -553,11 +589,11 @@ export const stopLocationTracking = async (): Promise<void> =>
 export const ensureTrackingRunning = async (
   shipmentUuid: string,
   intervalSeconds?: number,
-): Promise<void> => {
+): Promise<boolean> => {
   const health = await inspectLocationHealth();
   if (health.state !== "ok") {
     await syncLocationHealth(shipmentUuid);
-    return;
+    return false;
   }
 
   const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).catch(
@@ -565,8 +601,9 @@ export const ensureTrackingRunning = async (
   );
   const applied = await getAppliedInterval();
   const desired = clampInterval(intervalSeconds ?? (await getDesiredInterval()));
+  const activeUuid = await AsyncStorage.getItem(KEYS.ACTIVE_SHIPMENT);
 
-  if (running && applied === desired) return;
+  if (running && applied === desired && activeUuid === shipmentUuid) return true;
 
-  await startLocationTracking(shipmentUuid, desired);
+  return startLocationTracking(shipmentUuid, desired);
 };

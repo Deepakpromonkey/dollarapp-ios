@@ -59,6 +59,7 @@ export default function LocationAlertBanner({
 
         <Pressable
           onPress={onPressAction}
+          hitSlop={6}
           style={({ pressed }) => [
             styles.action,
             { backgroundColor: accent, opacity: pressed ? 0.8 : 1 },

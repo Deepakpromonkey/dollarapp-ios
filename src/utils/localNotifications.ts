@@ -128,6 +128,24 @@ export async function ensureNotificationPermission(): Promise<boolean> {
   }
 }
 
+/*
+| Whether notifications may be posted, without ever asking. Alerts are raised
+| from background tasks (an arrival geofence, the location task), where there
+| is no screen to put a prompt on, and asking from there is also exactly the
+| kind of out-of-context request App Review objects to.
+*/
+async function canPostNotifications(): Promise<boolean> {
+  if (moduleUsable === false) return false;
+
+  try {
+    const current = await Notifications.getPermissionsAsync();
+    moduleUsable = true;
+    return current.granted;
+  } catch (err) {
+    return markUnusable(err);
+  }
+}
+
 export interface LocalAlert {
   title: string;
   body: string;
@@ -151,7 +169,7 @@ export async function presentLocalAlert(alert: LocalAlert): Promise<boolean> {
   if (moduleUsable === false) return false;
 
   try {
-    const permitted = await ensureNotificationPermission();
+    const permitted = await canPostNotifications();
     if (!permitted) return false;
 
     configureNotificationHandler();
@@ -195,7 +213,7 @@ export async function scheduleRepeatingAlert(
   if (moduleUsable === false) return false;
 
   try {
-    const permitted = await ensureNotificationPermission();
+    const permitted = await canPostNotifications();
     if (!permitted) return false;
 
     configureNotificationHandler();

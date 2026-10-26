@@ -1,11 +1,16 @@
 import AppButton from "@/components/AppButton";
 import AppText from "@/components/AppText";
+import PhotoCaptureModal from "@/components/PhotoCaptureModal";
+import RetryNotice from "@/components/loads/RetryNotice";
 import { useAppTheme } from "@/hooks/useAppTheme";
-import { loadApi } from "@/lib/loadApi";
+import { invalidate } from "@/lib/invalidate";
+import { friendlyError, loadApi } from "@/lib/loadApi";
 import type { StopEvent } from "@/types/shipment";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
+import { getPositionWithin } from "@/utils/currentPosition";
+import { shrinkPhoto } from "@/utils/photos";
 import { useCallback, useEffect, useState } from "react";
 import {
     ActivityIndicator,
@@ -45,61 +50,102 @@ export default function StopEventsCard({
     const [events, setEvents] = useState<StopEvent[]>([]);
     const [values, setValues] = useState<Record<string, string>>({});
     const [images, setImages] = useState<Record<string, LocalImage>>({});
+    /* The question the in-app camera is open for, or null. */
+    const [cameraFor, setCameraFor] = useState<string | null>(null);
+    /* Picked photos still being shrunk; saving now would leave them out. */
+    const [preparing, setPreparing] = useState(0);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
+    /* Fetching the questions failed: replaces the form, with a retry. */
+    const [loadError, setLoadError] = useState<string | null>(null);
+    /* Saving failed: shown under the answers, which stay as typed. */
     const [error, setError] = useState<string | null>(null);
 
+    /*
+    | Another stop: start again from a spinner. Adjusted while rendering, so
+    | the fetch effect below only has to start the request.
+    */
+    const stopKey = `${shipmentUuid}:${stopId}`;
+    const [shownStop, setShownStop] = useState(stopKey);
+    if (shownStop !== stopKey) {
+        setShownStop(stopKey);
+        setLoading(true);
+        setLoadError(null);
+        setError(null);
+    }
+
+    /* The request itself: state changes only once it settles. */
+    const fetchEvents = useCallback(
+        () =>
+            loadApi
+                .getStopEvents(shipmentUuid, stopId)
+                .then((res) => {
+                    const list = res.data?.data?.events ?? [];
+                    setEvents(list);
+
+                    // Seed the inputs with whatever was answered before, so re-opening
+                    // the form shows the driver what they already said.
+                    setValues(
+                        Object.fromEntries(
+                            list
+                                .filter((e) => e.answer_value != null)
+                                .map((e) => [e.id, String(e.answer_value)]),
+                        ),
+                    );
+                })
+                .catch((err: unknown) => {
+                    // Rendering nothing here left a driver blocked by questions they could not see.
+                    setEvents([]);
+                    setLoadError(friendlyError(err, "Could not load the questions."));
+                })
+                .finally(() => setLoading(false)),
+        [shipmentUuid, stopId],
+    );
+
+    /* Try again, from the error card. */
     const load = useCallback(async () => {
         setLoading(true);
+        setLoadError(null);
         setError(null);
-        try {
-            const res = await loadApi.getStopEvents(shipmentUuid, stopId);
-            const list = res.data?.data?.events ?? [];
-            setEvents(list);
-
-            // Seed the inputs with whatever was answered before, so re-opening
-            // the form shows the driver what they already said.
-            setValues(
-                Object.fromEntries(
-                    list
-                        .filter((e) => e.answer_value != null)
-                        .map((e) => [e.id, String(e.answer_value)]),
-                ),
-            );
-        } catch (err: unknown) {
-            setError(
-                err instanceof Error ? err.message : "Could not load questions",
-            );
-        } finally {
-            setLoading(false);
-        }
-    }, [shipmentUuid, stopId]);
+        await fetchEvents();
+    }, [fetchEvents]);
 
     useEffect(() => {
-        load();
-    }, [load]);
+        void fetchEvents();
+    }, [fetchEvents]);
 
-    const pickImage = async (eventId: string) => {
-        const permission = await ImagePicker.requestCameraPermissionsAsync();
+    /*
+    | Photos are taken with the in-app camera (PhotoCaptureModal): the phone's
+    | camera app discarded a shot when the driver swiped back instead of
+    | tapping ✓, without a word. A photo taken earlier can still be picked.
+    | "Compatible" has iOS hand over a JPEG instead of the HEIC it stores, which
+    | the server rejects. The system picker needs no photo-library permission.
+    */
+    const choosePhoto = async (eventId: string) => {
+        try {
+            const result = await ImagePicker.launchImageLibraryAsync({
+                quality: 0.6,
+                preferredAssetRepresentationMode:
+                    ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
+            });
+            if (result.canceled || !result.assets?.length) return;
 
-        // Falling back to the library rather than dead-ending: a driver who has
-        // denied the camera can still have a photo of the paperwork.
-        const result = permission.granted
-            ? await ImagePicker.launchCameraAsync({ quality: 0.6 })
-            : await ImagePicker.launchImageLibraryAsync({ quality: 0.6 });
-
-        if (result.canceled || !result.assets?.length) return;
-
-        const asset = result.assets[0];
-
-        setImages((prev) => ({
-            ...prev,
-            [eventId]: {
-                uri: asset.uri,
-                name: asset.fileName ?? `event-${eventId}.jpg`,
-                type: asset.mimeType ?? "image/jpeg",
-            },
-        }));
+            const asset = result.assets[0];
+            setPreparing((n) => n + 1);
+            const uri = await shrinkPhoto(asset.uri).finally(() =>
+                setPreparing((n) => n - 1),
+            );
+            setImages((prev) => ({
+                ...prev,
+                [eventId]: {
+                    uri,
+                    name: `event-${eventId}.jpg`,
+                    type: "image/jpeg",
+                },
+            }));
+        } catch (err: unknown) {
+            setError(friendlyError(err, "Could not open your photos."));
+        }
     };
 
     const missingRequired = events.filter((event) => {
@@ -111,6 +157,9 @@ export default function StopEventsCard({
     });
 
     const submit = async () => {
+        if (preparing > 0) return;
+        // Only what goes out now is cleared afterwards; anything added meanwhile stays.
+        const sent = images;
         setSaving(true);
         setError(null);
         try {
@@ -119,11 +168,10 @@ export default function StopEventsCard({
             try {
                 const permission = await Location.getForegroundPermissionsAsync();
                 if (permission.granted) {
-                    const position = await Location.getCurrentPositionAsync({});
-                    coords = {
-                        latitude: position.coords.latitude,
-                        longitude: position.coords.longitude,
-                    };
+                    const position = await getPositionWithin(Location.Accuracy.Balanced);
+                    coords = position
+                        ? { latitude: position.coords.latitude, longitude: position.coords.longitude }
+                        : null;
                 }
             } catch {
                 coords = null;
@@ -133,16 +181,24 @@ export default function StopEventsCard({
                 shipmentUuid,
                 stopId,
                 values,
-                images,
+                sent,
                 coords,
             );
 
             const outstanding = res.data?.data?.outstanding ?? 0;
             setEvents(res.data?.data?.events ?? []);
-            setImages({});
+            setImages((current) =>
+                Object.fromEntries(
+                    Object.entries(current).filter(
+                        ([eventId, image]) => sent[eventId]?.uri !== image.uri,
+                    ),
+                ),
+            );
             onSaved?.(outstanding);
+            // Answers gate the stop's next step, wherever the trip is showing it.
+            invalidate("trip");
         } catch (err: unknown) {
-            setError(err instanceof Error ? err.message : "Could not save answers");
+            setError(friendlyError(err, "Could not save your answers."));
         } finally {
             setSaving(false);
         }
@@ -153,6 +209,17 @@ export default function StopEventsCard({
             <View style={[styles.card, { backgroundColor: theme.card }]}>
                 <ActivityIndicator color={theme.primaryButton} />
             </View>
+        );
+    }
+
+    if (loadError) {
+        return (
+            <RetryNotice
+                title="Couldn't load the questions"
+                message={loadError}
+                onRetry={load}
+                style={styles.notice}
+            />
         );
     }
 
@@ -241,36 +308,53 @@ export default function StopEventsCard({
                             })}
                         </View>
                     ) : event.answer_type === "image_upload" ? (
-                        <Pressable
-                            onPress={() => pickImage(event.id)}
-                            style={[
-                                styles.imagePicker,
-                                { backgroundColor: theme.cardSecondary },
-                            ]}>
-                            {images[event.id] || event.answer_image_url ? (
-                                <Image
-                                    source={{
-                                        uri:
-                                            images[event.id]?.uri ??
-                                            event.answer_image_url!,
-                                    }}
-                                    style={styles.preview}
-                                />
-                            ) : (
-                                <>
-                                    <MaterialCommunityIcons
-                                        name="camera-plus-outline"
-                                        size={22}
-                                        color={theme.secondaryText}
+                        <>
+                            <Pressable
+                                onPress={() => setCameraFor(event.id)}
+                                // Locked while saving: the save clears photos when it lands.
+                                disabled={saving}
+                                style={[
+                                    styles.imagePicker,
+                                    { backgroundColor: theme.cardSecondary },
+                                ]}>
+                                {images[event.id] || event.answer_image_url ? (
+                                    <Image
+                                        source={{
+                                            uri:
+                                                images[event.id]?.uri ??
+                                                event.answer_image_url!,
+                                        }}
+                                        style={styles.preview}
                                     />
-                                    <AppText
-                                        variant="caption"
-                                        style={{ color: theme.secondaryText }}>
-                                        Take or choose a photo
-                                    </AppText>
-                                </>
-                            )}
-                        </Pressable>
+                                ) : (
+                                    <>
+                                        <MaterialCommunityIcons
+                                            name="camera-plus-outline"
+                                            size={22}
+                                            color={theme.secondaryText}
+                                        />
+                                        <AppText
+                                            variant="caption"
+                                            style={{ color: theme.secondaryText }}>
+                                            Take a photo
+                                        </AppText>
+                                    </>
+                                )}
+                            </Pressable>
+                            <Pressable
+                                onPress={() => choosePhoto(event.id)}
+                                disabled={saving}
+                                hitSlop={8}
+                                style={[styles.photosLink, saving && { opacity: 0.4 }]}>
+                                <AppText
+                                    variant="caption"
+                                    style={{ color: theme.primaryButton, fontWeight: "600" }}>
+                                    {images[event.id] || event.answer_image_url
+                                        ? "Retake by tapping the photo, or choose from your photos"
+                                        : "or choose from your photos"}
+                                </AppText>
+                            </Pressable>
+                        </>
                     ) : (
                         <TextInput
                             value={values[event.id] ?? ""}
@@ -312,6 +396,26 @@ export default function StopEventsCard({
                 title={saving ? "Saving..." : "Save answers"}
                 onPress={submit}
                 loading={saving}
+                disabled={preparing > 0}
+            />
+
+            <PhotoCaptureModal
+                visible={cameraFor !== null}
+                title="Photo for your broker"
+                onCaptured={(photo) => {
+                    const eventId = cameraFor;
+                    setCameraFor(null);
+                    if (!eventId) return;
+                    setImages((prev) => ({
+                        ...prev,
+                        [eventId]: {
+                            uri: photo.uri,
+                            name: `event-${eventId}.jpg`,
+                            type: "image/jpeg",
+                        },
+                    }));
+                }}
+                onClose={() => setCameraFor(null)}
             />
         </View>
     );
@@ -321,6 +425,9 @@ const styles = StyleSheet.create({
     card: {
         borderRadius: 16,
         padding: 16,
+        marginBottom: 20,
+    },
+    notice: {
         marginBottom: 20,
     },
     header: {
@@ -370,5 +477,9 @@ const styles = StyleSheet.create({
         height: 160,
         borderRadius: 8,
         resizeMode: "cover",
+    },
+    photosLink: {
+        alignSelf: "center",
+        marginTop: 8,
     },
 });

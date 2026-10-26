@@ -1,8 +1,10 @@
 import { useAppTheme } from '@/hooks/useAppTheme';
-import * as Location from 'expo-location';
-import { useEffect, useRef, useState } from 'react';
+import type { ShipmentStop } from '@/types/shipment';
+import { type Coord, stopCoord, toCoord } from '@/utils/geo';
+import { destinationStop, orderedStops, originStop, stopTitle } from '@/utils/stops';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Platform,
   StyleSheet,
   Text,
@@ -10,6 +12,7 @@ import {
   ViewStyle
 } from 'react-native';
 import MapView, {
+  EdgePadding,
   MapViewProps,
   Marker,
   Polyline,
@@ -27,137 +30,165 @@ import MapView, {
 */
 const MAP_PROVIDER = Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined;
 
+type StopRole = 'origin' | 'stop' | 'destination';
 
-export interface TripWaypoint {
-  latitude: number;
-  longitude: number;
-  title?: string;
-}
+const PIN_COLORS: Record<StopRole, string> = {
+  origin: '#4A90E2',
+  stop: '#F59E0B',
+  destination: '#EF4444',
+};
+
+const DEFAULT_FIT_PADDING: EdgePadding = { top: 100, right: 100, bottom: 100, left: 100 };
 
 interface TripMapViewProps extends Omit<MapViewProps, 'style'> {
-  route?: TripWaypoint[];
-  origin?: TripWaypoint;
-  destination?: TripWaypoint;
-  currentPosition?: TripWaypoint;
-  showUserLocation?: boolean;
+  /** The load's stops, in any order. One without a usable position is left off the map. */
+  stops?: ShipmentStop[] | null;
+  /**
+   * The driver's position, from the trip screen's own watch. The map never
+   * asks for location itself: one screen asks, once, instead of three
+   * components stacking prompts on top of each other.
+   */
+  userLocation?: Coord | null;
+  /** Location access is granted and switched on, so the blue dot can be drawn. */
+  locationEnabled?: boolean;
+  /** A short note shown over the map without hiding it, e.g. why the driver's position is missing. */
+  notice?: string | null;
   fitToRoute?: boolean;
+  /** Room to leave around the route when fitting, for whatever is drawn over the map. */
+  fitPadding?: EdgePadding;
   style?: ViewStyle;
 }
 
+interface PlacedStop {
+  key: string;
+  coordinate: Coord;
+  title: string;
+  description: string;
+  role: StopRole;
+}
 
 export default function TripMapView({
-  route = [],
-  origin,
-  destination,
-  currentPosition: currentPositionProp,
-  showUserLocation = true,
+  stops,
+  userLocation: userLocationProp,
+  locationEnabled = false,
+  notice,
   fitToRoute = true,
+  fitPadding = DEFAULT_FIT_PADDING,
   style,
   ...mapProps
 }: TripMapViewProps) {
   const theme = useAppTheme();
   const mapRef = useRef<MapView>(null);
 
-  const [permissionStatus, setPermissionStatus] =
-    useState<Location.PermissionStatus | null>(null);
-  const [canAskAgain, setCanAskAgain] = useState(true);
-  const [userLocation, setUserLocation] =
-    useState<TripWaypoint | null>(null);
-  const [locationError, setLocationError] = useState<string | null>(null);
-  const [mapReady, setMapReady] = useState(false);
-
-  const currentPosition = currentPositionProp ?? userLocation;
-
-  useEffect(() => {
-    if (!showUserLocation) return;
-
-    let subscriber: Location.LocationSubscription | null = null;
-
-    (async () => {
-      try {
-        const { status, canAskAgain: askable } =
-          await Location.requestForegroundPermissionsAsync();
-        setPermissionStatus(status);
-        setCanAskAgain(askable);
-
-        if (status !== Location.PermissionStatus.GRANTED) {
-          setLocationError('Location permission denied');
-          return;
-        }
-
-        const initial = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-        setUserLocation({
-          latitude: initial.coords.latitude,
-          longitude: initial.coords.longitude,
-        });
-
-        subscriber = await Location.watchPositionAsync(
-          {
-            accuracy: Location.Accuracy.Balanced,
-            timeInterval: 5000,
-            distanceInterval: 10,
-          },
-          (loc) => {
-            setUserLocation({
-              latitude: loc.coords.latitude,
-              longitude: loc.coords.longitude,
-            });
-          }
-        );
-      } catch (err) {
-        setLocationError('Could not get location');
-      }
-    })();
-
-    return () => {
-      subscriber?.remove();
-    };
-  }, [showUserLocation]);
-
-  const allCoords: TripWaypoint[] = [
-    ...(origin ? [origin] : []),
-    ...route,
-    ...(destination ? [destination] : []),
-    ...(currentPosition ? [currentPosition] : []),
-  ];
-
+  /*
+  | Fitting straight after onMapReady can land before the map has its size,
+  | and Android refuses bounds on a map with none, so the camera is left
+  | alone for a beat first.
+  */
+  const [cameraReady, setCameraReady] = useState(false);
+  const readyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (readyTimer.current) clearTimeout(readyTimer.current);
+    },
+    [],
+  );
   const handleMapReady = () => {
-    setMapReady(true);
-    if (!fitToRoute || allCoords.length < 2) {
-      return;
-    }
-    setTimeout(() => {
-      mapRef.current?.fitToCoordinates(allCoords, {
-        edgePadding: { top: 100, right: 100, bottom: 100, left: 100 },
-        animated: true,
-      });
-    }, 500);
+    if (readyTimer.current) clearTimeout(readyTimer.current);
+    readyTimer.current = setTimeout(() => setCameraReady(true), 300);
   };
 
-  useEffect(() => {
-    if (!mapReady || !fitToRoute || !userLocation) return;
-    const coords: TripWaypoint[] = [
-      ...(origin ? [origin] : []),
-      ...route,
-      ...(destination ? [destination] : []),
-      userLocation,
-    ];
-    if (coords.length < 2) return;
+  /*
+  | Every coordinate goes through toCoord before it reaches the map. A stop
+  | saved without coordinates arrives blank or as the API's "0","0"
+  | stand-in: blank used to become NaN, which react-native-maps hands to the
+  | native map as null and which crashed the whole app in a release build,
+  | and 0,0 drew the route to the Gulf of Guinea and zoomed out to the world.
+  */
+  const userLocation = userLocationProp
+    ? toCoord(userLocationProp.latitude, userLocationProp.longitude)
+    : null;
+
+  const placed = useMemo<PlacedStop[]>(() => {
+    const ordered = orderedStops(stops);
+    const first = originStop(ordered);
+    const last = destinationStop(ordered);
+
+    const result: PlacedStop[] = [];
+    ordered.forEach((stop, index) => {
+      const coordinate = stopCoord(stop);
+      if (!coordinate) return;
+      const role: StopRole = stop === first ? 'origin' : stop === last ? 'destination' : 'stop';
+      result.push({
+        key: String(stop.id ?? index),
+        coordinate,
+        title: stopTitle(stop),
+        description: [`Stop ${index + 1} of ${ordered.length}`, stop.stop_type]
+          .filter(Boolean)
+          .join(' · '),
+        role,
+      });
+    });
+    return result;
+  }, [stops]);
+
+  const route = useMemo(() => placed.map((p) => p.coordinate), [placed]);
+  const routeKey = useMemo(
+    () => route.map((c) => `${c.latitude},${c.longitude}`).join('|'),
+    [route],
+  );
+
+  const fittedWithFix = useRef(false);
+
+  // An effect event: it reads the latest position without every GPS update re-fitting the camera.
+  const fitCamera = useEffectEvent(() => {
+    if (userLocation) fittedWithFix.current = true;
+
+    const coords = [...route, ...(userLocation ? [userLocation] : [])];
+    if (coords.length === 0) return;
+
+    if (coords.length === 1) {
+      // Bounds around a single point would zoom all the way in.
+      mapRef.current?.animateToRegion(
+        { ...coords[0], latitudeDelta: 0.05, longitudeDelta: 0.05 },
+        500,
+      );
+      return;
+    }
+
     mapRef.current?.fitToCoordinates(coords, {
-      edgePadding: { top: 80, right: 80, bottom: 80, left: 80 },
+      edgePadding: {
+        top: Math.round(fitPadding.top),
+        right: Math.round(fitPadding.right),
+        bottom: Math.round(fitPadding.bottom),
+        left: Math.round(fitPadding.left),
+      },
       animated: true,
     });
-  }, [userLocation?.latitude, userLocation?.longitude, mapReady]);
+  });
 
-  const initialRegion =
-    allCoords.length > 0
+  /*
+  | The camera moves for the driver only when there is something new to
+  | frame: the map becoming ready, the route changing (another load, or a
+  | stop located since), and the first GPS fix. It used to re-fit on every
+  | position update, every few seconds, undoing any pan or zoom.
+  */
+  useEffect(() => {
+    if (cameraReady && fitToRoute) fitCamera();
+  }, [cameraReady, fitToRoute, routeKey]);
+
+  const hasFix = !!userLocation;
+  useEffect(() => {
+    if (cameraReady && fitToRoute && hasFix && !fittedWithFix.current) fitCamera();
+  }, [cameraReady, fitToRoute, hasFix]);
+
+  // The map reads this once, at mount; every later move is one of the fits above.
+  const [initialRegion] = useState(() => {
+    const coords = [...route, ...(userLocation ? [userLocation] : [])];
+    return coords.length > 0
       ? {
-          latitude:
-            allCoords.reduce((s, c) => s + c.latitude, 0) / allCoords.length,
-          longitude:
-            allCoords.reduce((s, c) => s + c.longitude, 0) / allCoords.length,
+          latitude: coords.reduce((s, c) => s + c.latitude, 0) / coords.length,
+          longitude: coords.reduce((s, c) => s + c.longitude, 0) / coords.length,
           latitudeDelta: 8,
           longitudeDelta: 8,
         }
@@ -167,6 +198,7 @@ export default function TripMapView({
           latitudeDelta: 60,
           longitudeDelta: 60,
         };
+  });
 
   return (
     <View style={[styles.container, style]}>
@@ -176,10 +208,7 @@ export default function TripMapView({
         provider={MAP_PROVIDER}
         initialRegion={initialRegion}
         onMapReady={handleMapReady}
-        showsUserLocation={
-          showUserLocation &&
-          permissionStatus === Location.PermissionStatus.GRANTED
-        }
+        showsUserLocation={locationEnabled}
         showsMyLocationButton={false}
         showsCompass={false}
         showsScale={false}
@@ -196,78 +225,25 @@ export default function TripMapView({
           />
         )}
 
-        {origin && (
-          <Marker 
-            coordinate={origin} 
-            title={origin.title}
-            pinColor="#4A90E2"
-          />
-        )}
-
-        {destination && (
-          <Marker 
-            coordinate={destination} 
-            title={destination.title}
-            pinColor="#EF4444"
-          />
-        )}
-
-        {currentPositionProp && (
+        {placed.map((p) => (
           <Marker
-            coordinate={currentPositionProp}
-            title="Current Position"
-            pinColor="#10B981"
+            key={p.key}
+            coordinate={p.coordinate}
+            title={p.title}
+            description={p.description}
+            pinColor={PIN_COLORS[p.role]}
           />
-        )}
+        ))}
       </MapView>
 
-      {showUserLocation &&
-        permissionStatus === Location.PermissionStatus.GRANTED &&
-        !userLocation && (
-          <View style={styles.overlay} pointerEvents="none">
-            <ActivityIndicator color={theme.primaryButton} size="small" />
-          </View>
-        )}
-
-      {locationError && (
-        <View style={[styles.permissionOverlay, { backgroundColor: theme.card }]}>
-          <Text style={styles.permissionIcon}>📍</Text>
-          <Text style={[styles.permissionTitle, { color: theme.text }]}>
-            {canAskAgain ? 'Location Access Needed' : 'Location Access Blocked'}
+      {notice ? (
+        <View style={[styles.notice, { backgroundColor: theme.card }]} pointerEvents="none">
+          <MaterialCommunityIcons name="map-marker-off" size={16} color="#D97706" />
+          <Text style={[styles.noticeText, { color: theme.text }]} numberOfLines={2}>
+            {notice}
           </Text>
-          <Text style={[styles.permissionDesc, { color: theme.secondaryText }]}>
-            {'Location access is off, so your position is not shown on the map. ' +
-              'The route and stops below are unaffected.'}
-          </Text>
-          {/*
-            | No button here, deliberately.
-            |
-            | This card used to offer "Grant Location Access", which re-issued
-            | the permission request, or "Open Settings", which sent the driver
-            | out to enable it. Both appeared immediately after the driver
-            | declined, and App Review rejected that under guideline 5.1.1(iv)
-            | — pressing a user to revisit a permission they just refused does
-            | not respect the refusal.
-            |
-            | The card now only states what the consequence is. A driver who
-            | changes their mind can grant access in Settings themselves; the
-            | app does not ask twice.
-          */}
         </View>
-      )}
-    </View>
-  );
-}
-
-function TruckDot({ color }: { color: string }) {
-  return (
-    <View
-      style={[
-        styles.truckDot,
-        { borderColor: color, backgroundColor: `${color}33` },
-      ]}
-    >
-      <View style={[styles.truckInner, { backgroundColor: color }]} />
+      ) : null}
     </View>
   );
 }
@@ -276,103 +252,27 @@ const styles = StyleSheet.create({
   container: {
     overflow: 'hidden',
   },
-  pin: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    justifyContent: 'center',
+  // A strip, not a cover: the route and the pins stay visible behind it.
+  notice: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 24,
+    flexDirection: 'row',
     alignItems: 'center',
-    borderWidth: 2.5,
-    borderColor: '#fff',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 4,
-  },
-  pinDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#fff',
-  },
-  truckDot: {
-    width: 24,
-    height: 24,
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-  },
-  truckInner: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-  },
-  callout: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.15,
     shadowRadius: 4,
     elevation: 3,
   },
-  calloutText: {
+  noticeText: {
+    flex: 1,
     fontSize: 12,
     fontWeight: '500',
-  },
-  overlay: {
-    ...StyleSheet.absoluteFill,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.08)',
-  },
-  errorBanner: {
-    position: 'absolute',
-    bottom: 10,
-    alignSelf: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 20,
-  },
-  errorText: {
-    fontSize: 12,
-  },
-  permissionOverlay: {
-    ...StyleSheet.absoluteFill,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 28,
-    gap: 12,
-    zIndex: 10,
-  },
-  permissionIcon: {
-    fontSize: 48,
-    marginBottom: 4,
-  },
-  permissionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  permissionDesc: {
-    fontSize: 13,
-    textAlign: 'center',
-    lineHeight: 20,
-    paddingHorizontal: 8,
-  },
-  permissionBtn: {
-    marginTop: 8,
-    paddingVertical: 13,
-    paddingHorizontal: 32,
-    borderRadius: 14,
-    alignItems: 'center',
-  },
-  permissionBtnText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
   },
 });

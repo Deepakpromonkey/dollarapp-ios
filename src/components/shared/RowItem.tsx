@@ -28,6 +28,9 @@ interface RowItemProps {
 
     showChevron?: boolean;
 
+    /** Opens a web page: shows an "open outside" icon instead of the chevron. */
+    external?: boolean;
+
     statusIcon?: boolean;
     onPress?: () => void;
 }
@@ -40,6 +43,7 @@ export default function RowItem({
     matchScore,
     variant = "normal",
     showChevron = true,
+    external = false,
     statusIcon = false,
     onPress,
 }: RowItemProps) {
@@ -56,6 +60,7 @@ export default function RowItem({
         <Pressable
             onPress={onPress}
             disabled={!onPress}
+            accessibilityRole={external ? "link" : "button"}
             style={({ pressed }) => [
                 styles.row,
                 { backgroundColor: theme.card },
@@ -121,8 +126,8 @@ export default function RowItem({
                 )}
                 {showChevron && !cfg && (
                     <MaterialCommunityIcons
-                        name="chevron-right"
-                        size={22}
+                        name={external ? "open-in-new" : "chevron-right"}
+                        size={external ? 18 : 22}
                         color={theme.secondaryText}
                     />
                 )}

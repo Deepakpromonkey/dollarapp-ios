@@ -1,6 +1,13 @@
 import AppText from "@/components/AppText";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import type { Shipment, ShipmentStop } from "@/types/shipment";
+import {
+    destinationStop,
+    originStop,
+    stopAppointment,
+    stopSubtitle,
+    stopTitle,
+} from "@/utils/stops";
 import { Pressable, StyleSheet, View } from "react-native";
 
 interface Props {
@@ -27,15 +34,20 @@ function getStatusColor(
     }
 }
 
+/** "2026-10-14 · 11:00 India", leaving out whatever the broker did not fill in. */
+export function appointmentLine(stop: ShipmentStop): string {
+    const { date, time, timezone } = stopAppointment(stop);
+    return [date, time ? [time, timezone].filter(Boolean).join(" ") : null]
+        .filter(Boolean)
+        .join(" · ");
+}
+
 export default function ShipmentCard({ shipment, isActive = false, onPress }: Props) {
     const theme = useAppTheme();
 
-    const pickup: ShipmentStop | undefined = shipment.stops.find(
-        (s) => s.stop_type === "Pickup",
-    );
-    const delivery: ShipmentStop | undefined = shipment.stops.find(
-        (s) => s.stop_type === "Delivery",
-    );
+    const stops = shipment.stops ?? [];
+    const pickup = originStop(stops);
+    const delivery = destinationStop(stops);
 
     const statusColor = getStatusColor(
         shipment.status,
@@ -58,8 +70,11 @@ export default function ShipmentCard({ shipment, isActive = false, onPress }: Pr
                 { opacity: pressed && !!onPress ? 0.85 : 1 },
             ]}>
             <View style={styles.header}>
-                <AppText variant="body" style={{ color: theme.text }}>
-                    {shipment.pro_number}
+                <AppText
+                    variant="body"
+                    style={{ color: theme.text, flex: 1, marginRight: 10 }}
+                    numberOfLines={1}>
+                    {shipment.pro_number || shipment.shipment_no}
                 </AppText>
                 <View
                     style={[
@@ -101,41 +116,8 @@ export default function ShipmentCard({ shipment, isActive = false, onPress }: Pr
                 </View>
 
                 <View style={styles.routeTextCol}>
-
-                    <View style={styles.routeStop}>
-                        <AppText
-                            variant="label1"
-                            style={{ color: theme.text }}
-                            numberOfLines={1}>
-                             {pickup?.city ? `${pickup.city}, ${pickup.state}` : pickup?.stop_name ?? "—"}
-                        </AppText>
-                        {pickup && (
-                            <AppText
-                                variant="caption"
-                                style={{ color: theme.secondaryText }}>
-                                {pickup.start_date} · {pickup.start_time}
-                            </AppText>
-                        )}
-                    </View>
-
-
-                    <View style={styles.routeStop}>
-                        <AppText
-                            variant="label1"
-                            style={{ color: theme.text }}
-                            numberOfLines={1}>
-                             {delivery?.city
-                                ? `${delivery.city}, ${delivery.state}`
-                                : delivery?.stop_name ?? "—"}
-                        </AppText>
-                        {delivery && (
-                            <AppText
-                                variant="caption"
-                                style={{ color: statusColor }}>
-                                {delivery.start_date} · {delivery.start_time}
-                            </AppText>
-                        )}
-                    </View>
+                    <StopLine stop={pickup} timeColor={theme.secondaryText} />
+                    <StopLine stop={delivery} timeColor={statusColor} />
                 </View>
             </View>
 
@@ -155,7 +137,7 @@ export default function ShipmentCard({ shipment, isActive = false, onPress }: Pr
                     <AppText
                         variant="tiny"
                         style={[styles.infoLabel, { color: theme.secondaryText }]}>
-                        EQUIPMENT
+                        TRUCK
                     </AppText>
                     <AppText
                         variant="label1"
@@ -196,10 +178,51 @@ export default function ShipmentCard({ shipment, isActive = false, onPress }: Pr
                 <AppText
                     variant="caption"
                     style={{ color: theme.secondaryText }}>
-                    0/{shipment.stops.length} STOPS
+                    {stops.length} {stops.length === 1 ? "STOP" : "STOPS"}
                 </AppText>
             </View>
         </Pressable>
+    );
+}
+
+function StopLine({ stop, timeColor }: { stop?: ShipmentStop; timeColor: string }) {
+    const theme = useAppTheme();
+
+    if (!stop) {
+        return (
+            <View style={styles.routeStop}>
+                <AppText variant="label1" style={{ color: theme.secondaryText }}>
+                    —
+                </AppText>
+            </View>
+        );
+    }
+
+    const subtitle = stopSubtitle(stop);
+    const when = appointmentLine(stop);
+
+    return (
+        <View style={styles.routeStop}>
+            <AppText
+                variant="label1"
+                style={{ color: theme.text }}
+                numberOfLines={1}>
+                {stopTitle(stop)}
+            </AppText>
+            {subtitle ? (
+                <AppText
+                    variant="tiny"
+                    style={{ color: theme.secondaryText }}
+                    numberOfLines={1}>
+                    {subtitle}
+                </AppText>
+            ) : null}
+            {when ? (
+                <AppText variant="caption" style={{ color: timeColor }}>
+                    {when}
+                </AppText>
+            ) : null}
+        </View>
     );
 }
 

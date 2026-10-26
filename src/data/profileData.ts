@@ -1,12 +1,5 @@
+import { LINKS } from "@/constants/links";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-
-export interface ProfileUser {
-    name: string;
-    role: string;
-    company: string;
-    avatarUri?: string;
-    didVerified: boolean;
-}
 
 export interface BadgeConfig {
     label: string;
@@ -14,8 +7,13 @@ export interface BadgeConfig {
     bg: string;
 }
 
+/*
+| Tiles carry a badge here only when it never changes. The License, My
+| Equipment and Verification badges used to be hardcoded "VERIFIED" for every
+| driver; the profile screen now works them out from the driver's own data.
+*/
 export interface ProfileTileData {
-    id: string;
+    id: "personal" | "license" | "equipment" | "verification";
     icon: keyof typeof MaterialCommunityIcons.glyphMap;
     title: string;
     badge?: BadgeConfig;
@@ -28,6 +26,8 @@ export interface ProfileRowData {
     subtitle?: string;
     badge?: BadgeConfig;
     variant?: "normal" | "destructive";
+    /** A web page the row opens in the in-app browser. */
+    url?: string;
 }
 
 export type TripStatus = "clean" | "issue" | "pending";
@@ -42,13 +42,6 @@ export interface ProfileActivityData {
     destination: string;
     destinationTime: string;
 }
-
-export const profileUser: ProfileUser = {
-    name: "Anshul Gupta",
-    role: "Driver",
-    company: "Yo Yo",
-    didVerified: true,
-};
 
 export const accountTiles: ProfileTileData[] = [
     {
@@ -65,31 +58,16 @@ export const accountTiles: ProfileTileData[] = [
         id: "license",
         icon: "card-account-details-outline",
         title: "License (CDL)",
-        badge: {
-            label: "VERIFIED",
-            color: "#22C55E",
-            bg: "#22C55E18",
-        },
     },
     {
         id: "equipment",
         icon: "truck-outline",
-        title: "My Equipment", 
-        badge: {
-            label: "VERIFIED",
-            color: "#22C55E",
-            bg: "#22C55E18",
-        },
+        title: "My Equipment",
     },
     {
         id: "verification",
         icon: "shield-check-outline",
         title: "Verification",
-        badge: {
-            label: "VERIFIED",
-             color: "#22C55E",
-            bg: "#22C55E18",
-        },
     },
 ];
 
@@ -108,12 +86,14 @@ export const supportRows: ProfileRowData[] = [
         icon: "help-circle-outline",
         title: "Help & Support",
         subtitle: "",
+        url: LINKS.support,
     },
     {
-        id: "teams",
-        icon: "account-group-outline",
-        title: "Teams & Privacy",
+        id: "terms",
+        icon: "shield-lock-outline",
+        title: "Terms & Privacy",
         subtitle: "",
+        url: LINKS.privacy,
     },
     {
         id: "logout",
@@ -128,7 +108,7 @@ export const dangerRows: ProfileRowData[] = [
         id: "delete",
         icon: "delete-outline",
         title: "Delete Account",
-        subtitle: "",
+        subtitle: "Deleted 15 days after you confirm",
         variant: "destructive",
     },
 ];

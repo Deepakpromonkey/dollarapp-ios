@@ -1,4 +1,5 @@
 import LoadDrawer from "@/components/LoadDrawer";
+import { NotificationBell } from "@/components/LoadHeader";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { ReactNode, useState } from "react";
@@ -7,7 +8,9 @@ import AppText from "./AppText";
 
 interface AppHeaderProps {
     appName?: string;
+    /** Defaults to opening the notification inbox. */
     onNotificationPress?: () => void;
+    /** Defaults to the driver's unread count. */
     notificationCount?: number;
     right?: ReactNode;
 }
@@ -15,7 +18,7 @@ interface AppHeaderProps {
 export default function AppHeader({
     appName = "Dollar Traq",
     onNotificationPress,
-    notificationCount = 0,
+    notificationCount,
     right,
 }: AppHeaderProps) {
     const theme = useAppTheme();
@@ -54,19 +57,13 @@ export default function AppHeader({
                 <View style={styles.rightSlot}>
                     {right}
 
-                    <Pressable
+                    <NotificationBell
                         onPress={onNotificationPress}
-                        hitSlop={10}
-                        style={[styles.iconBtn, { backgroundColor: iconBg }]}>
-                        <MaterialCommunityIcons
-                            name="bell-outline"
-                            size={22}
-                            color={iconColor}
-                        />
-                        {notificationCount > 0 && (
-                            <View style={styles.badge} />
-                        )}
-                    </Pressable>
+                        count={notificationCount}
+                        iconSize={22}
+                        iconColor={iconColor}
+                        backgroundColor={iconBg}
+                    />
                 </View>
             </View>
 
@@ -109,14 +106,5 @@ const styles = StyleSheet.create({
         borderRadius: 12,
         justifyContent: "center",
         alignItems: "center",
-    },
-    badge: {
-        position: "absolute",
-        top: 8,
-        right: 8,
-        width: 8,
-        height: 8,
-        borderRadius: 4,
-        backgroundColor: "#EF4444",
     },
 });

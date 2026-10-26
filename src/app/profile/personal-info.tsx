@@ -2,6 +2,7 @@ import AppText from "@/components/AppText";
 import NavHeader from "@/components/NavHeader";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useDriverProfile } from "@/hooks/useDriverProfile";
+import { useRefreshOnFocusAndForeground } from "@/hooks/useRefreshOnFocusAndForeground";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import {
     ActivityIndicator,
@@ -56,7 +57,8 @@ function InfoRow({ icon, label, value }: InfoRowProps) {
 
 export default function PersonalInfoScreen() {
     const theme = useAppTheme();
-    const { profile, isLoading } = useDriverProfile();
+    const { profile, isLoading, refetch } = useDriverProfile();
+    useRefreshOnFocusAndForeground(refetch);
 
     const fullName = profile
         ? `${profile.first_name} ${profile.last_name}`.trim()

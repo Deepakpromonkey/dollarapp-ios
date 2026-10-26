@@ -1,5 +1,6 @@
 import AppText from "@/components/AppText";
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { livenessBadge, type LivenessState } from "@/utils/liveness";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Image, Pressable, StyleSheet, View, ActivityIndicator } from "react-native";
 
@@ -11,7 +12,12 @@ interface ProfileHeroCardProps {
     phone?: string;
     designation?: string | null;
     avatarUri?: string;
-    verified?: boolean;
+    /** The identity check, from utils/liveness resolveLiveness. Null shows no badge. */
+    liveness?: LivenessState | null;
+    /** Start or re-check the identity check. The verified badge ignores taps. */
+    onLivenessPress?: () => void;
+    /** An identity check is starting or being re-checked. */
+    livenessBusy?: boolean;
     isUploading?: boolean;
     onEditAvatar?: () => void;
     onAvatarPress?: () => void;
@@ -25,12 +31,16 @@ export default function ProfileHeroCard({
     phone,
     designation,
     avatarUri,
-    verified = false,
+    liveness = null,
+    onLivenessPress,
+    livenessBusy = false,
     isUploading = false,
     onEditAvatar,
     onAvatarPress,
 }: ProfileHeroCardProps) {
     const theme = useAppTheme();
+    const badge = liveness ? livenessBadge(liveness, theme.primaryButton) : null;
+    const badgeTappable = !!badge?.actionable && !!onLivenessPress && !livenessBusy;
 
     return (
         <View style={[styles.card, { backgroundColor: theme.card }]}>
@@ -124,18 +134,47 @@ export default function ProfileHeroCard({
                     </View>
                 )}
 
-                {verified && (
-                    <View style={styles.verifiedBadge}>
+                {badge && (
+                    <Pressable
+                        onPress={onLivenessPress}
+                        disabled={!badgeTappable}
+                        accessibilityRole={badge.actionable ? "button" : "text"}
+                        accessibilityState={{ busy: livenessBusy }}
+                        hitSlop={6}
+                        style={({ pressed }) => [
+                            styles.livenessBadge,
+                            {
+                                backgroundColor: badge.bg,
+                                borderColor: badge.border,
+                                opacity: pressed && badgeTappable ? 0.7 : 1,
+                            },
+                        ]}>
+                        {livenessBusy ? (
+                            <ActivityIndicator size={12} color={badge.color} />
+                        ) : (
+                            <MaterialCommunityIcons
+                                name={badge.icon}
+                                size={12}
+                                color={badge.color}
+                            />
+                        )}
                         <AppText
                             variant="tiny"
                             style={{
-                                color: "#22C55E",
+                                color: badge.color,
                                 fontWeight: "700",
                                 letterSpacing: 0.4,
                             }}>
-                            DID VERIFIED
+                            {badge.label}
                         </AppText>
-                    </View>
+                        {badge.actionable && !livenessBusy && (
+                            <MaterialCommunityIcons
+                                name="chevron-right"
+                                size={12}
+                                color={badge.color}
+                            />
+                        )}
+                    </Pressable>
                 )}
             </View>
         </View>
@@ -185,15 +224,16 @@ const styles = StyleSheet.create({
         flex: 1,
         gap: 0,
     },
-    verifiedBadge: {
+    livenessBadge: {
         marginTop: 8,
         alignSelf: "flex-start",
-        backgroundColor: "#22C55E18",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 4,
         paddingHorizontal: 10,
         paddingVertical: 4,
         borderRadius: 20,
         borderWidth: 1,
-        borderColor: "#22C55E30",
     },
     contactInfo: {
         marginTop: 6,

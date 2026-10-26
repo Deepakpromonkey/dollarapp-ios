@@ -1,9 +1,12 @@
 import AppText from "@/components/AppText";
 import NavHeader from "@/components/NavHeader";
+import RetryNotice from "@/components/loads/RetryNotice";
 import ShipmentCard from "@/components/loads/ShipmentCard";
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { useRefreshOnFocusAndForeground } from "@/hooks/useRefreshOnFocusAndForeground";
 import { useShipments } from "@/hooks/useShipments";
 import { router } from "expo-router";
+import { useCallback, useState } from "react";
 import {
     ActivityIndicator,
     RefreshControl,
@@ -16,6 +19,18 @@ import { SafeAreaView } from "react-native-safe-area-context";
 export default function AllUpcomingScreen() {
     const theme = useAppTheme();
     const { upcoming, loading, error, refresh } = useShipments();
+    const [pulling, setPulling] = useState(false);
+
+    useRefreshOnFocusAndForeground(refresh);
+
+    const onPull = useCallback(async () => {
+        setPulling(true);
+        try {
+            await refresh();
+        } finally {
+            setPulling(false);
+        }
+    }, [refresh]);
 
     return (
         <SafeAreaView
@@ -26,38 +41,45 @@ export default function AllUpcomingScreen() {
                 <View style={styles.center}>
                     <ActivityIndicator color={theme.primaryButton} size="large" />
                 </View>
-            ) : error ? (
-                <View style={styles.center}>
-                    <AppText variant="caption" style={{ color: theme.err }}>
-                        {error}
-                    </AppText>
-                </View>
             ) : (
+                // Kept on errors too, so pulling down is always a way to try again.
                 <ScrollView
                     contentContainerStyle={styles.list}
                     showsVerticalScrollIndicator={false}
                     refreshControl={
                         <RefreshControl
-                            refreshing={loading}
-                            onRefresh={refresh}
+                            refreshing={pulling}
+                            onRefresh={onPull}
                             tintColor={theme.primaryButton}
                         />
                     }>
-                    {upcoming.length === 0 ? (
+                    {error ? (
+                        <RetryNotice
+                            title={
+                                upcoming.length === 0
+                                    ? "Couldn't get your loads"
+                                    : "Couldn't update your loads"
+                            }
+                            message={error}
+                            onRetry={onPull}
+                            busy={pulling}
+                            style={styles.notice}
+                        />
+                    ) : upcoming.length === 0 ? (
                         <AppText
                             variant="caption"
                             style={[styles.empty, { color: theme.secondaryText }]}>
                             No upcoming loads
                         </AppText>
-                    ) : (
-                        upcoming.map((s) => (
-                            <ShipmentCard
-                                key={s.id}
-                                shipment={s}
-                                onPress={() => router.push(`/loads/${s.id}`)}
-                            />
-                        ))
-                    )}
+                    ) : null}
+
+                    {upcoming.map((s) => (
+                        <ShipmentCard
+                            key={s.id}
+                            shipment={s}
+                            onPress={() => router.push(`/loads/${s.id}`)}
+                        />
+                    ))}
                 </ScrollView>
             )}
         </SafeAreaView>
@@ -76,6 +98,9 @@ const styles = StyleSheet.create({
         flex: 1,
         justifyContent: "center",
         alignItems: "center",
+    },
+    notice: {
+        marginBottom: 16,
     },
     empty: {
         textAlign: "center",

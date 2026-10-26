@@ -2,13 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import { AppState, AppStateStatus } from "react-native";
 
-import {
-  authedPost,
-  DEFAULT_INTERVAL_SECONDS,
-  KEYS,
-  LOCATION_PING_URL,
-  parseStoredInterval,
-} from "./locationConfig";
+import { DEFAULT_INTERVAL_SECONDS, KEYS, parseStoredInterval } from "./locationConfig";
 import { cancelAlert, presentLocalAlert } from "./localNotifications";
 
 /*
@@ -52,9 +46,6 @@ export interface LocationHealthSnapshot {
 | checks in between find nothing new and do nothing.
 */
 const NOTIFY_INTERVAL_MS = 5 * 60 * 1000;
-
-/** How often an unchanged problem is re-sent to the server. */
-const REPORT_INTERVAL_MS = 5 * 60 * 1000;
 
 /** Replaced in place on each new alert, so the tray holds one line, not a stack. */
 const ALERT_ID = "dt-location-health";
@@ -178,46 +169,6 @@ export async function inspectLocationHealth(): Promise<LocationHealthSnapshot> {
   }
 }
 
-/**
- * Tell the server that this driver's tracking is degraded (or recovered).
- *
- * Sent to the ping endpoint with an empty `locations` array. The previous
- * implementation reported a denied permission as a ping at lat 0 / lng 0, which
- * writes a real coordinate in the Gulf of Guinea into the load's breadcrumb
- * trail — the status belongs at the top level, not disguised as a position.
- */
-export async function reportLocationHealth(
-  snapshot: LocationHealthSnapshot,
-  shipmentUuid: string,
-): Promise<boolean> {
-  try {
-    const result = await authedPost(LOCATION_PING_URL, {
-      shipment_uuid: shipmentUuid,
-      locations: [],
-      location_status: snapshot.state,
-      services_enabled: snapshot.servicesEnabled,
-      fg_permission: snapshot.foregroundGranted,
-      bg_permission: snapshot.backgroundGranted,
-      device_timestamp: snapshot.checkedAt,
-    });
-
-    if (!result.ok) {
-      console.warn(
-        `[LocationHealth] Server rejected status report (${result.status}). ` +
-          "The endpoint may not accept status-only pings yet.",
-      );
-      return false;
-    }
-
-    return true;
-  } catch (err) {
-    // Offline is the common case here and is not worth escalating: the next
-    // successful ping carries the current permission flags anyway.
-    console.warn("[LocationHealth] Could not deliver status report:", err);
-    return false;
-  }
-}
-
 interface LastReport {
   state: string | null;
   reportedAt: number;
@@ -258,13 +209,8 @@ export interface SyncHealthOptions {
 }
 
 /**
- * Check tracking health and, when it has changed for the worse, tell both the
- * server and the driver.
- *
- * Deduplicated so a check running every minute does not produce a notification
- * every minute: the driver is alerted on the transition and then every
- * NOTIFY_INTERVAL_MS for as long as it lasts. A driver who dismissed the first
- * alert five minutes ago is still not being tracked.
+ * Check tracking health and, when it has changed for the worse, tell the
+ * driver, once per change of state.
  */
 export async function syncLocationHealth(
   shipmentUuid?: string | null,
@@ -284,7 +230,7 @@ export async function syncLocationHealth(
 
     const now = Date.now();
     const degraded = isDegraded(snapshot.state);
-    const { state: lastState, reportedAt } = await readLastReport();
+    const { state: lastState } = await readLastReport();
     const changed = lastState !== snapshot.state;
 
     /*
@@ -314,31 +260,25 @@ export async function syncLocationHealth(
       await clearLocationHealthAlerts();
     }
 
-    const shouldReport =
-      !!options.force || changed || (degraded && now - reportedAt >= REPORT_INTERVAL_MS);
-
     /*
-    | Once the OS repeat is armed it owns the ongoing nagging, so JavaScript
-    | only announces the transition. Firing on the timer as well would give a
-    | driver with the app open two notifications per cycle. The time-based arm
-    | is kept purely as a fallback for when scheduling failed.
+    | The server is not told from here. The status report this used to send
+    | had no position in it (`locations: []`), which the ping endpoint always
+    | refuses with 422, and it held up the tracker's start chain while the
+    | request ran. The server reads the permission state from bg_permission on
+    | every real ping, and notices silence itself ("GPS Signal Lost").
+    |
+    | The state is still recorded on every change: the notification below
+    | fires only on a transition.
     */
+    if (options.force || changed) {
+      await AsyncStorage.setItem(KEYS.LAST_HEALTH_STATE, snapshot.state);
+    }
+
     /*
     | Only on the transition into a degraded state: one notification per
     | problem, never a reminder. See the note above on guideline 5.1.1(iv).
     */
     const shouldNotify = !options.silent && degraded && changed;
-
-    if (!shouldReport && !shouldNotify) return snapshot;
-
-    if (shouldReport) {
-      await AsyncStorage.multiSet([
-        [KEYS.LAST_HEALTH_STATE, snapshot.state],
-        [KEYS.LAST_HEALTH_REPORT_AT, now.toString()],
-      ]);
-
-      await reportLocationHealth(snapshot, uuid);
-    }
 
     if (shouldNotify) {
       /*

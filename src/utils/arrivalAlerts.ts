@@ -2,9 +2,13 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 
+import { BASE_URL } from "@/lib/api";
+import { invalidate } from "@/lib/invalidate";
+
 import { presentLocalAlert } from "./localNotifications";
 import {
   ARRIVAL_RADIUS_METERS,
+  authedPost,
   GEOFENCE_TASK_NAME,
   KEYS,
   MAX_GEOFENCE_REGIONS,
@@ -37,10 +41,10 @@ interface StopLabels {
 /** Minimum shape needed to fence a stop; ShipmentStop satisfies it. */
 export interface GeofenceableStop {
   id: number;
-  stop_name: string;
-  stop_type: string;
-  latitude: string;
-  longitude: string;
+  stop_name: string | null;
+  stop_type: string | null;
+  latitude: string | number | null;
+  longitude: string | number | null;
 }
 
 /*
@@ -100,10 +104,12 @@ async function readNotified(): Promise<string[]> {
  * Turn stops into regions the OS can monitor, dropping any that cannot be
  * placed on the map.
  *
- * Coordinates arrive from the API as strings and are not always populated —
- * a stop entered without geocoding has empty ones. Number("") is 0, which is a
- * real position off the coast of Africa, so blank and unparseable values are
- * rejected explicitly rather than allowed to become a fence in the Atlantic.
+ * Coordinates arrive from the API as strings and are not always real: a stop
+ * entered without geocoding comes back empty, or as the "0","0" the API puts
+ * in its place. Number("") is 0, which is a real position off the coast of
+ * Africa, so blank, unparseable and 0,0 values are rejected explicitly rather
+ * than allowed to become a fence in the Atlantic. Read through String() so a
+ * coordinate sent as a number is handled too.
  */
 export function buildRegions(stops: GeofenceableStop[]): {
   regions: Location.LocationRegion[];
@@ -115,12 +121,14 @@ export function buildRegions(stops: GeofenceableStop[]): {
   for (const stop of stops) {
     if (regions.length >= MAX_GEOFENCE_REGIONS) break;
 
-    const latitude = Number(stop.latitude);
-    const longitude = Number(stop.longitude);
+    const rawLatitude = String(stop.latitude ?? "").trim();
+    const rawLongitude = String(stop.longitude ?? "").trim();
+    const latitude = Number(rawLatitude);
+    const longitude = Number(rawLongitude);
 
     const usable =
-      stop.latitude?.trim() &&
-      stop.longitude?.trim() &&
+      rawLatitude !== "" &&
+      rawLongitude !== "" &&
       Number.isFinite(latitude) &&
       Number.isFinite(longitude) &&
       Math.abs(latitude) <= 90 &&
@@ -250,6 +258,79 @@ async function teardown(): Promise<void> {
 /* The task                                                            */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Record an arrival and say whether it still needs announcing.
+ *
+ * Runs on the same chain as start and stop, so two crossings landing together
+ * cannot both read the list before either writes it, and a crossing that
+ * arrives as the load ends is not announced after the load has gone.
+ *
+ * @returns the uuid of the load the stop belongs to, or null when there is
+ *          nothing to announce.
+ */
+const claimArrival = (identifier: string): Promise<string | null> =>
+  serialize(async () => {
+    /*
+    | Nothing is being monitored any more: the load finished, or the driver
+    | logged out, between the OS seeing the crossing and this running.
+    */
+    const shipmentUuid = await AsyncStorage.getItem(KEYS.GEOFENCE_SHIPMENT);
+    if (!shipmentUuid) return null;
+
+    /*
+    | Announce an arrival once per load.
+    |
+    | iOS re-delivers an enter event whenever the driver crosses the boundary,
+    | and manoeuvring a truck around a yard edge crosses it repeatedly. Without
+    | this the driver is notified every time they reposition at a dock.
+    */
+    const notified = await readNotified();
+    if (notified.includes(identifier)) return null;
+
+    await AsyncStorage.setItem(
+      KEYS.GEOFENCE_NOTIFIED,
+      JSON.stringify([...notified, identifier]),
+    );
+    return shipmentUuid;
+  });
+
+/*
+| Long enough for a slow cell connection, short enough that a dead one cannot
+| hold the task open: iOS gives a geofence wake-up only seconds to finish.
+*/
+const INBOX_POST_TIMEOUT_MS = 10_000;
+
+/**
+ * Copy an announced arrival into the driver's notification inbox.
+ *
+ * Best effort and quiet: the local alert has already been shown, which is what
+ * matters to the driver on the road. Uses the stored token directly, like the
+ * location pings, because this runs from a task that can wake with no screen
+ * and no signed-in state in memory. The server ignores a stop that is not on
+ * one of this driver's loads and records each stop only once.
+ */
+async function copyArrivalToInbox(identifier: string): Promise<void> {
+  const stopId = Number(identifier);
+  if (!Number.isInteger(stopId) || stopId <= 0) return;
+
+  try {
+    const result = await authedPost(
+      `${BASE_URL}/notifications/arrival`,
+      { stop_id: stopId },
+      { timeoutMs: INBOX_POST_TIMEOUT_MS },
+    );
+
+    if (result.ok) {
+      // Only reaches anything when the app is open: the bell picks up the new row.
+      invalidate("notifications");
+    } else {
+      console.log(`[DollarTraq Arrivals] Inbox copy refused (${result.status}).`);
+    }
+  } catch (err) {
+    console.log("[DollarTraq Arrivals] Could not copy arrival to the inbox:", err);
+  }
+}
+
 TaskManager.defineTask(GEOFENCE_TASK_NAME, async ({ data, error }) => {
   if (error) {
     console.warn("[DollarTraq Arrivals] Geofence error:", error);
@@ -267,20 +348,8 @@ TaskManager.defineTask(GEOFENCE_TASK_NAME, async ({ data, error }) => {
 
   const identifier = region.identifier;
 
-  /*
-  | Announce an arrival once per load.
-  |
-  | iOS re-delivers an enter event whenever the driver crosses the boundary,
-  | and manoeuvring a truck around a yard edge crosses it repeatedly. Without
-  | this the driver is notified every time they reposition at a dock.
-  */
-  const notified = await readNotified();
-  if (notified.includes(identifier)) return;
-
-  await AsyncStorage.setItem(
-    KEYS.GEOFENCE_NOTIFIED,
-    JSON.stringify([...notified, identifier]),
-  );
+  const shipmentUuid = await claimArrival(identifier);
+  if (!shipmentUuid) return;
 
   const labels = await readStopLabels();
   const name = labels[identifier];
@@ -289,8 +358,11 @@ TaskManager.defineTask(GEOFENCE_TASK_NAME, async ({ data, error }) => {
     identifier: `arrival-${identifier}`,
     title: name ? `Arrived at ${name}` : "Arrived at your stop",
     body: "Open DollarTraq to check in and complete this stop.",
-    data: { type: "stop_arrival", stop_id: identifier },
+    // Tapping it opens the trip (see the listeners in app/_layout.tsx).
+    data: { type: "stop_arrival", stop_id: identifier, shipment_uuid: shipmentUuid },
   });
 
   console.log(`[DollarTraq Arrivals] Announced arrival at stop ${identifier}.`);
+
+  await copyArrivalToInbox(identifier);
 });

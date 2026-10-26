@@ -2,17 +2,32 @@ import AppButton from "@/components/AppButton";
 import AppText from "@/components/AppText";
 import NavHeader from "@/components/NavHeader";
 import SectionHeader from "@/components/SectionHeader";
+import RetryNotice from "@/components/loads/RetryNotice";
+import { appointmentLine } from "@/components/loads/ShipmentCard";
 import StopEventsCard from "@/components/loads/StopEventsCard";
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { useRefreshOnFocusAndForeground } from "@/hooks/useRefreshOnFocusAndForeground";
 import { useShipments } from "@/hooks/useShipments";
-import { loadApi } from "@/lib/loadApi";
+import { ApiError } from "@/lib/api";
+import { invalidate } from "@/lib/invalidate";
+import { friendlyError, loadApi } from "@/lib/loadApi";
 import type { Shipment, ShipmentStop } from "@/types/shipment";
+import { estimatedRouteMiles, formatMiles } from "@/utils/geo";
+import { markLoadNotificationsRead } from "@/utils/notificationRouting";
+import {
+    destinationStop,
+    orderedStops,
+    originStop,
+    stopSubtitle,
+    stopTitle,
+} from "@/utils/stops";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
+    RefreshControl,
     ScrollView,
     StyleSheet,
     View,
@@ -33,7 +48,15 @@ function getStatusColor(status: string, primary: string, err: string): string {
     }
 }
 
-function InfoTile({ label, value }: { label: string; value: string }) {
+function InfoTile({
+    label,
+    value,
+    caption,
+}: {
+    label: string;
+    value: string | null | undefined;
+    caption?: string;
+}) {
     const theme = useAppTheme();
     return (
         <View style={[styles.infoTile, { backgroundColor: theme.cardSecondary }]}>
@@ -45,8 +68,41 @@ function InfoTile({ label, value }: { label: string; value: string }) {
             <AppText variant="label1" style={{ color: theme.text, marginTop: 4 }}>
                 {value || "—"}
             </AppText>
+            {caption ? (
+                <AppText
+                    variant="tiny"
+                    style={{ color: theme.secondaryText, marginTop: 2 }}>
+                    {caption}
+                </AppText>
+            ) : null}
         </View>
     );
+}
+
+type StopKind = "pickup" | "delivery" | "other";
+
+function stopKind(stop: ShipmentStop): StopKind {
+    const type = (stop.stop_type ?? "").trim().toLowerCase();
+    return type === "pickup" || type === "delivery" ? type : "other";
+}
+
+/* Short place name for the chat header: the city when there is one. */
+function placeName(stop?: ShipmentStop): string {
+    return stop ? stop.city?.trim() || stopTitle(stop) : "";
+}
+
+/*
+| Distance is worked out from the stops' coordinates (straight lines between
+| them, stretched by a road factor), so it is labelled as an estimate. With a
+| stop the broker never located there is nothing honest to show.
+*/
+function distanceTile(stops: ShipmentStop[]): { value: string; caption?: string } {
+    if (stops.length < 2) return { value: "—" };
+
+    const miles = estimatedRouteMiles(stops);
+    return miles === null
+        ? { value: "—", caption: "Stop location pending" }
+        : { value: `≈ ${formatMiles(miles)}`, caption: "Estimated road distance" };
 }
 
 function RouteTimeline({
@@ -73,17 +129,7 @@ function RouteTimeline({
                 <View style={styles.routeTextCol}>
                     {/* Pickup */}
                     <View style={styles.routeStop}>
-                        <AppText
-                            variant="label"
-                            style={{ color: theme.text, fontWeight: "600" }}>
-                            {pickup?.city ? `${pickup.city}, ${pickup.state}` : pickup?.stop_name ?? "—"}
-                        </AppText>
-                        {pickup && (
-                            <AppText variant="caption" style={{ color: theme.secondaryText }}>
-                                {pickup.start_date}
-                                {pickup.start_time ? ` · ${pickup.start_time} - ${pickup.end_time ?? ""} ${pickup.start_timezone ?? ""}` : ""}
-                            </AppText>
-                        )}
+                        <RouteStopText stop={pickup} />
                         {pickup && (
                             <View style={styles.readyBadge}>
                                 <View
@@ -99,23 +145,41 @@ function RouteTimeline({
                     </View>
 
                     <View style={styles.routeStop}>
-                        <AppText
-                            variant="label"
-                            style={{ color: theme.text, fontWeight: "600" }}>
-                            {delivery?.city
-                                ? `${delivery.city}, ${delivery.state}`
-                                : delivery?.stop_name ?? "—"}
-                        </AppText>
-                        {delivery && (
-                            <AppText variant="caption" style={{ color: theme.secondaryText }}>
-                                {delivery.start_date}
-                                {delivery.start_time ? ` · ${delivery.start_time}` : ""}
-                            </AppText>
-                        )}
+                        <RouteStopText stop={delivery} />
                     </View>
                 </View>
             </View>
         </View>
+    );
+}
+
+/* Name, the place it is in when the name does not say, and the appointment. */
+function RouteStopText({ stop }: { stop?: ShipmentStop }) {
+    const theme = useAppTheme();
+    const subtitle = stopSubtitle(stop);
+    const when = stop ? appointmentLine(stop) : "";
+
+    return (
+        <>
+            <AppText
+                variant="label"
+                style={{ color: theme.text, fontWeight: "600" }}>
+                {stopTitle(stop)}
+            </AppText>
+            {subtitle ? (
+                <AppText
+                    variant="caption"
+                    style={{ color: theme.secondaryText }}
+                    numberOfLines={2}>
+                    {subtitle}
+                </AppText>
+            ) : null}
+            {when ? (
+                <AppText variant="caption" style={{ color: theme.secondaryText }}>
+                    {when}
+                </AppText>
+            ) : null}
+        </>
     );
 }
 
@@ -173,15 +237,27 @@ function StopsList({ stops }: { stops: ShipmentStop[] }) {
                 Stops ({stops.length})
             </AppText>
             {stops.map((stop, idx) => {
-                const isPickup = stop.stop_type === "Pickup";
-                const dotColor = isPickup ? theme.primaryButton : "#EF4444";
+                const kind = stopKind(stop);
+                const dotColor =
+                    kind === "pickup"
+                        ? theme.primaryButton
+                        : kind === "delivery"
+                          ? "#EF4444"
+                          : theme.secondaryText;
                 const isLast = idx === stops.length - 1;
+                const when = appointmentLine(stop);
                 return (
                     <View key={stop.id} style={styles.stopRow}>
                         <View style={styles.stopTimeline}>
                             <View style={[styles.stopDot, { backgroundColor: dotColor }]}>
                                 <MaterialCommunityIcons
-                                    name={isPickup ? "package-up" : "package-down"}
+                                    name={
+                                        kind === "pickup"
+                                            ? "package-up"
+                                            : kind === "delivery"
+                                              ? "package-down"
+                                              : "map-marker"
+                                    }
                                     size={10}
                                     color="#fff"
                                 />
@@ -198,24 +274,17 @@ function StopsList({ stops }: { stops: ShipmentStop[] }) {
                                 <AppText
                                     variant="label1"
                                     style={{ color: theme.text, fontWeight: "600", flex: 1 }}>
-                                    {stop.stop_name}
+                                    {stopTitle(stop)}
                                 </AppText>
                                 <View
                                     style={[
                                         styles.stopTypeBadge,
-                                        {
-                                            backgroundColor: isPickup
-                                                ? theme.primaryButton + "18"
-                                                : "#EF444418",
-                                        },
+                                        { backgroundColor: dotColor + "18" },
                                     ]}>
                                     <AppText
                                         variant="tiny"
-                                        style={{
-                                            color: isPickup ? theme.primaryButton : "#EF4444",
-                                            fontWeight: "700",
-                                        }}>
-                                        {stop.stop_type.toUpperCase()}
+                                        style={{ color: dotColor, fontWeight: "700" }}>
+                                        {(stop.stop_type || "Stop").toUpperCase()}
                                     </AppText>
                                 </View>
                             </View>
@@ -226,13 +295,13 @@ function StopsList({ stops }: { stops: ShipmentStop[] }) {
                                     .filter(Boolean)
                                     .join(", ")}
                             </AppText>
-                            <AppText
-                                variant="tiny"
-                                style={{ color: theme.secondaryText, marginTop: 3 }}>
-                                {stop.start_date}
-                                {stop.start_time ? ` · ${stop.start_time}` : ""}
-                                {stop.start_timezone ? ` ${stop.start_timezone}` : ""}
-                            </AppText>
+                            {when ? (
+                                <AppText
+                                    variant="tiny"
+                                    style={{ color: theme.secondaryText, marginTop: 3 }}>
+                                    {when}
+                                </AppText>
+                            ) : null}
                         </View>
                     </View>
                 );
@@ -245,25 +314,73 @@ function StopsList({ stops }: { stops: ShipmentStop[] }) {
 export default function LoadDetailScreen() {
     const theme = useAppTheme();
     const { id } = useLocalSearchParams<{ id: string }>();
-    const { active, upcoming, past, loading, refresh } = useShipments();
+    const { active, upcoming, past, loading, error, refresh } = useShipments();
     const [activating, setActivating] = useState(false);
+    const [pulling, setPulling] = useState(false);
+    const [lookedUp, setLookedUp] = useState(false);
 
-    const allShipments: Shipment[] = [...active, ...upcoming, ...past];
+    const onPull = useCallback(async () => {
+        setPulling(true);
+        try {
+            await refresh();
+        } finally {
+            setPulling(false);
+        }
+    }, [refresh]);
 
     // The list is keyed by id, but every journey endpoint is keyed by uuid, so
     // match on either — a link built from one should not dead-end on the other.
-    const shipment = allShipments.find(
-        (s) => String(s.id) === id || s.uuid === id,
+    const shipment = useMemo(
+        () =>
+            [...active, ...upcoming, ...past].find(
+                (s) => String(s.id) === id || s.uuid === id,
+            ),
+        [active, upcoming, past, id],
     );
+
+    /*
+    | Seeing the load is what "New load assigned" asked for, so its inbox row
+    | is done with. The broker's push carries no inbox uuid, and the sync files
+    | the row up to a minute after it, so this runs on every return to the
+    | screen as well as when it opens: a later look clears a row that landed
+    | after the first one. By uuid, which the route may not carry (the profile
+    | links by id), hence the load the store found.
+    */
+    const shipmentUuid = shipment?.uuid ?? null;
+
+    useEffect(() => {
+        void markLoadNotificationsRead("load_assigned", shipmentUuid);
+    }, [shipmentUuid]);
+
+    const refreshOnReturn = useCallback(() => {
+        void refresh();
+        void markLoadNotificationsRead("load_assigned", shipmentUuid);
+    }, [refresh, shipmentUuid]);
+
+    useRefreshOnFocusAndForeground(refreshOnReturn);
+
+    /*
+    | A link from a push or the notification list can name a load assigned
+    | after the list was last fetched. Ask the server once more before telling
+    | the driver it does not exist.
+    */
+    useEffect(() => {
+        if (shipment || lookedUp) return;
+
+        let current = true;
+        refresh().finally(() => {
+            if (current) setLookedUp(true);
+        });
+        return () => {
+            current = false;
+        };
+    }, [shipment, lookedUp, refresh]);
 
     const statusColor = shipment
         ? getStatusColor(shipment.status, theme.primaryButton, theme.err)
         : theme.primaryButton;
 
-    const pickup = shipment?.stops.find((s) => s.stop_type === "Pickup");
-    const delivery = shipment?.stops.find((s) => s.stop_type === "Delivery");
-
-    if (loading && !shipment) {
+    if (!shipment && (loading || !lookedUp)) {
         return (
             <SafeAreaView
                 style={[styles.screen, { backgroundColor: theme.background }]}>
@@ -280,7 +397,15 @@ export default function LoadDetailScreen() {
             <SafeAreaView
                 style={[styles.screen, { backgroundColor: theme.background }]}>
                 <NavHeader title="Load Detail" />
-                <View style={styles.center}>
+                <ScrollView
+                    contentContainerStyle={styles.centerScroll}
+                    refreshControl={
+                        <RefreshControl
+                            refreshing={pulling}
+                            onRefresh={onPull}
+                            tintColor={theme.primaryButton}
+                        />
+                    }>
                     <MaterialCommunityIcons
                         name="truck-alert-outline"
                         size={48}
@@ -288,23 +413,34 @@ export default function LoadDetailScreen() {
                     />
                     <AppText
                         variant="label"
-                        style={{ color: theme.secondaryText, marginTop: 12, textAlign: "center" }}>
-                        Load not found
+                        style={{ color: theme.text, marginTop: 12, textAlign: "center" }}>
+                        {error ? "Couldn't open this load" : "Load not found"}
                     </AppText>
-                </View>
+                    <AppText
+                        variant="caption"
+                        style={{ color: theme.secondaryText, textAlign: "center" }}>
+                        {error ?? "It may have been removed or given to another driver."}
+                    </AppText>
+                    <AppButton
+                        title="Try again"
+                        variant="secondary"
+                        onPress={onPull}
+                        loading={pulling}
+                        style={styles.retryButton}
+                    />
+                </ScrollView>
             </SafeAreaView>
         );
     }
 
-    const pickupStop = shipment.stops
-        .filter((s) => s.stop_type === "Pickup")
-        .sort((a, b) => a.stop_number - b.stop_number)[0];
+    const stops = orderedStops(shipment.stops);
+    const pickup = originStop(stops);
+    const delivery = destinationStop(stops);
+    const distance = distanceTile(stops);
+    const loadName = shipment.shipment_no || shipment.pro_number;
 
-    const deliveryStop = shipment.stops
-        .filter((s) => s.stop_type === "Delivery")
-        .sort((a, b) => b.stop_number - a.stop_number)[0];
-
-    const hasEvents = (stop?: ShipmentStop) => (stop?.events?.length ?? 0) > 0;
+    const hasEvents = (stop?: ShipmentStop): stop is ShipmentStop =>
+        (stop?.events?.length ?? 0) > 0;
 
     /**
      * Start the load. The API refuses a second activation, so a driver who
@@ -314,17 +450,27 @@ export default function LoadDetailScreen() {
         setActivating(true);
         try {
             await loadApi.activate(shipment.uuid);
-            refresh();
+            // My Trip, the Loads tab and this screen all show the load's state.
+            invalidate("shipments", "trip");
             Alert.alert(
                 "Load activated",
                 "This load is now active. You can start your trip.",
-                [{ text: "Go to trip", onPress: () => router.push("/(tabs)/trip") },
+                [{ text: "Go to trip", onPress: () => router.dismissTo("/(tabs)/trip") },
                  { text: "Stay here", style: "cancel" }],
             );
         } catch (err: unknown) {
+            // Another load is under way (one at a time): say which, and offer the way to it.
+            if (err instanceof ApiError && err.status === 409) {
+                invalidate("shipments");
+                Alert.alert("Finish your active load first", err.message, [
+                    { text: "Not now", style: "cancel" },
+                    { text: "Go to My Trip", onPress: () => router.dismissTo("/(tabs)/trip") },
+                ]);
+                return;
+            }
             Alert.alert(
                 "Could not activate",
-                err instanceof Error ? err.message : "Please try again.",
+                friendlyError(err, "Please try again."),
             );
         } finally {
             setActivating(false);
@@ -334,18 +480,22 @@ export default function LoadDetailScreen() {
     return (
         <SafeAreaView
             style={[styles.screen, { backgroundColor: theme.background }]}>
-            <NavHeader
-                title={shipment.shipment_no || shipment.pro_number}
-                
-            />
+            <NavHeader title={loadName} />
 
             <ScrollView
                 contentContainerStyle={styles.content}
-                showsVerticalScrollIndicator={false}>
+                showsVerticalScrollIndicator={false}
+                refreshControl={
+                    <RefreshControl
+                        refreshing={pulling}
+                        onRefresh={onPull}
+                        tintColor={theme.primaryButton}
+                    />
+                }>
 
                 <View style={styles.heroRow}>
                     <AppText variant="h2" style={{ color: theme.text, fontWeight: "700" }}>
-                        {shipment.shipment_no || shipment.pro_number}
+                        {loadName}
                     </AppText>
                     <View
                         style={[styles.statusBadge, { borderColor: statusColor + "55" }]}>
@@ -355,6 +505,16 @@ export default function LoadDetailScreen() {
                         </AppText>
                     </View>
                 </View>
+
+                {error ? (
+                    <RetryNotice
+                        title="Couldn't update this load"
+                        message={error}
+                        onRetry={onPull}
+                        busy={pulling}
+                        style={styles.notice}
+                    />
+                ) : null}
 
                 {/* Nothing else on this load can happen until it is started,
                     so the button sits above the detail rather than below it. */}
@@ -368,7 +528,7 @@ export default function LoadDetailScreen() {
                         <AppText
                             variant="caption"
                             style={{ color: theme.secondaryText, marginTop: 4, marginBottom: 14 }}>
-                            Activating this load begins tracking and unlocks the trip steps.
+                            Activating this load unlocks equipment verification and the trip steps.
                         </AppText>
                         <AppButton
                             title={activating ? "Activating..." : "Activate Load"}
@@ -378,7 +538,42 @@ export default function LoadDetailScreen() {
                     </View>
                 )}
 
-                {shipment.is_activated && (
+                {/* One load at a time: instead of an Activate button that would be refused, name the load in the way. */}
+                {!shipment.can_activate && !shipment.is_activated && shipment.activation_blocked_by && (
+                    <View style={[styles.activateCard, { backgroundColor: theme.card }]}>
+                        <AppText
+                            variant="label"
+                            style={{ color: theme.text, fontWeight: "700" }}>
+                            Finish your active load first
+                        </AppText>
+                        <AppText
+                            variant="caption"
+                            style={{ color: theme.secondaryText, marginTop: 4, marginBottom: 14 }}>
+                            You are on {shipment.activation_blocked_by.shipment_no}. Complete it before
+                            starting this load.
+                        </AppText>
+                        <AppButton
+                            title="Go to My Trip"
+                            onPress={() => router.dismissTo("/(tabs)/trip")}
+                        />
+                    </View>
+                )}
+
+                {/* A delivered load is still "activated" (it has a journey), but it is Past. */}
+                {shipment.is_activated && shipment.status === "Past" && (
+                    <View style={[styles.activateCard, { backgroundColor: theme.card }]}>
+                        <View style={styles.activeRow}>
+                            <MaterialCommunityIcons name="truck-check" size={18} color="#16A34A" />
+                            <AppText
+                                variant="label1"
+                                style={{ color: theme.text, flex: 1 }}>
+                                This load is delivered
+                            </AppText>
+                        </View>
+                    </View>
+                )}
+
+                {shipment.is_activated && shipment.status !== "Past" && (
                     <View style={[styles.activateCard, { backgroundColor: theme.card }]}>
                         <View style={styles.activeRow}>
                             <MaterialCommunityIcons
@@ -392,10 +587,12 @@ export default function LoadDetailScreen() {
                                 This load is active
                             </AppText>
                         </View>
+                        {/* dismissTo, not push: pushing the tabs from here stacks a
+                            second copy of them over the first. */}
                         <AppButton
                             title="Open trip"
                             variant="secondary"
-                            onPress={() => router.push("/(tabs)/trip")}
+                            onPress={() => router.dismissTo("/(tabs)/trip")}
                             style={{ marginTop: 12 }}
                         />
                     </View>
@@ -437,7 +634,14 @@ export default function LoadDetailScreen() {
                                 pathname: "/chat",
                                 params: {
                                     uuid: shipment.uuid,
-                                    title: `${shipment.shipment_no || shipment.pro_number} · ${pickup?.city ?? ""} → ${delivery?.city ?? ""}`,
+                                    title: [
+                                        loadName,
+                                        pickup && delivery
+                                            ? `${placeName(pickup)} → ${placeName(delivery)}`
+                                            : "",
+                                    ]
+                                        .filter(Boolean)
+                                        .join(" · "),
                                 },
                             })
                         }
@@ -455,15 +659,12 @@ export default function LoadDetailScreen() {
                 <SectionHeader label="Shipment Details" />
                 <View style={[styles.section, { backgroundColor: theme.card }]}>
                     <View style={styles.infoGrid}>
-                        <InfoTile label="Equipment" value={shipment.truck_number} />
                         <InfoTile
                             label="Distance"
-                            value={
-                                pickup && delivery
-                                    ? "—"
-                                    : "—"
-                            }
+                            value={distance.value}
+                            caption={distance.caption}
                         />
+                        <InfoTile label="Stops" value={String(stops.length)} />
                     </View>
                     <View style={[styles.infoGrid, { marginTop: 10 }]}>
                         <InfoTile label="Shipment No" value={shipment.shipment_no} />
@@ -487,34 +688,35 @@ export default function LoadDetailScreen() {
                     </>
                 )}
 
-                {shipment.stops.length > 0 && (
+                {stops.length > 0 && (
                     <>
                         <SectionHeader label="Stops" />
-                        <StopsList stops={shipment.stops} />
+                        <StopsList stops={stops} />
                     </>
                 )}
 
                 {/* The broker's questions. Only worth showing once the load is
                     running — before that there is nothing to answer them about,
                     and the API will not accept them anyway. */}
-                {shipment.is_activated && hasEvents(pickupStop) && (
+                {shipment.is_activated && hasEvents(pickup) && (
                     <>
                         <SectionHeader label="Pickup Questions" />
                         <StopEventsCard
                             shipmentUuid={shipment.uuid}
-                            stopId={pickupStop.id}
-                            title={`Pickup · ${pickupStop.stop_name || pickupStop.city || "Stop"}`}
+                            stopId={pickup.id}
+                            title={`Pickup · ${stopTitle(pickup)}`}
                         />
                     </>
                 )}
 
-                {shipment.is_activated && hasEvents(deliveryStop) && (
+                {/* A one-stop load has the same stop at both ends: ask once. */}
+                {shipment.is_activated && hasEvents(delivery) && delivery.id !== pickup?.id && (
                     <>
                         <SectionHeader label="Delivery Questions" />
                         <StopEventsCard
                             shipmentUuid={shipment.uuid}
-                            stopId={deliveryStop.id}
-                            title={`Delivery · ${deliveryStop.stop_name || deliveryStop.city || "Stop"}`}
+                            stopId={delivery.id}
+                            title={`Delivery · ${stopTitle(delivery)}`}
                         />
                     </>
                 )}
@@ -531,7 +733,7 @@ export default function LoadDetailScreen() {
                         </AppText>
                     </AppText>
                     <AppText variant="caption" style={{ color: theme.secondaryText }}>
-                        0/{shipment.stops.length} STOPS
+                        {stops.length} {stops.length === 1 ? "STOP" : "STOPS"}
                     </AppText>
                 </View>
 
@@ -549,6 +751,23 @@ const styles = StyleSheet.create({
         justifyContent: "center",
         alignItems: "center",
         gap: 8,
+    },
+
+    centerScroll: {
+        flexGrow: 1,
+        justifyContent: "center",
+        alignItems: "center",
+        gap: 8,
+        padding: 24,
+    },
+
+    retryButton: {
+        marginTop: 12,
+        alignSelf: "stretch",
+    },
+
+    notice: {
+        marginBottom: 20,
     },
 
     content: {

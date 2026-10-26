@@ -4,6 +4,7 @@ import { useAppTheme } from "@/hooks/useAppTheme";
 import { authApi } from "@/lib/api";
 import { startVerification, VerificationStatus } from "@didit-protocol/sdk-react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { useState } from "react";
 import {
     ActivityIndicator,
@@ -14,15 +15,29 @@ import {
 } from "react-native";
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
- 
+
 const { height } = Dimensions.get("window");
- 
+
+/*
+ * How creating the account went. On a failure, `next` is the way on that can
+ * work: sending the same request again ("retry") only helps when the failure
+ * was passing; a declined identity check needs a new check ("recheck"), and an
+ * account that already exists or a sign-up that timed out needs the login
+ * screen ("login").
+ */
+export type FinishResult =
+    | { ok: true }
+    | { ok: false; next: "retry" | "recheck" | "login"; message: string };
+
 interface Step6LivenessProps {
     registrationToken: string;
-    onComplete: (diditSessionId: string) => void;
+    onComplete: (diditSessionId: string) => Promise<FinishResult>;
 }
- 
-type LivenessState = "intro" | "loading" | "done" | "review" | "skipped" | "error";
+
+type LivenessState = "intro" | "loading" | "done" | "review" | "skipped" | "error" | "unfinished";
+
+/** The screen shown while the account is being created, by how the check ended. */
+type FinishingState = "done" | "review" | "skipped";
 
 /*
  * What the backend accepts, in local only, to skip the Didit call entirely.
@@ -36,9 +51,45 @@ export default function Step6Liveness({
 }: Step6LivenessProps) {
     const theme = useAppTheme();
     const insets = useSafeAreaInsets();
- 
+    const router = useRouter();
+
     const [uiState, setUiState] = useState<LivenessState>("intro");
     const [errorMessage, setErrorMessage] = useState<string>("");
+    // What was last sent to create the account, so "Try again" resends exactly that.
+    const [sent, setSent] = useState<{ diditSessionId: string; shown: FinishingState } | null>(null);
+    const [failure, setFailure] = useState<{ next: "retry" | "login"; message: string } | null>(null);
+
+    /*
+     * Hands the outcome to the signup screen, which creates the account. A
+     * failure there used to go to an alert this step never heard about, so the
+     * screen stayed on "Completing registration…" for good, with no Back button
+     * on iOS to leave it by. Now the answer comes back here, and the screen
+     * offers the way on that fits it.
+     */
+    const finish = async (diditSessionId: string, shown: FinishingState) => {
+        setSent({ diditSessionId, shown });
+        setUiState(shown);
+
+        const result = await onComplete(diditSessionId).catch(
+            (): FinishResult => ({
+                ok: false,
+                next: "retry",
+                message: "Registration failed. Please try again.",
+            }),
+        );
+        // Success signs the driver in, and the app leaves signup by itself.
+        if (result.ok) return;
+
+        if (result.next === "recheck") {
+            setErrorMessage(result.message);
+            setUiState("error");
+            return;
+        }
+        setFailure({ next: result.next, message: result.message });
+        setUiState("unfinished");
+    };
+
+    const backToLogin = () => router.dismissTo("/(auth)/login");
 
     /*
      * Skipping sends no session id at all — the backend treats a blank
@@ -47,8 +98,7 @@ export default function Step6Liveness({
      * "skipped"` instead of failing the request.
      */
     const handleSkip = () => {
-        setUiState("skipped");
-        onComplete("");
+        void finish("", "skipped");
     };
 
     const handleStart = async () => {
@@ -79,11 +129,9 @@ export default function Step6Liveness({
                      * keeps the screen honest about which of the two happened.
                      */
                     if (result.session.status === VerificationStatus.Approved) {
-                        setUiState("done");
-                        onComplete(didit_session_id);
+                        await finish(didit_session_id, "done");
                     } else if (result.session.status === VerificationStatus.Pending) {
-                        setUiState("review");
-                        onComplete(didit_session_id);
+                        await finish(didit_session_id, "review");
                     } else {
                         setErrorMessage(
                             `Verification status: ${result.session.status}. Please try again.`,
@@ -144,6 +192,7 @@ export default function Step6Liveness({
                     style={{ color: theme.secondaryText, textAlign: "center", marginTop: 8 }}>
                     Your identity has been confirmed. Completing registration…
                 </AppText>
+                <ActivityIndicator color={theme.primaryButton} style={styles.finishingSpinner} />
             </View>
         );
     }
@@ -167,6 +216,7 @@ export default function Step6Liveness({
                     Completing registration… You can verify your identity anytime
                     from your profile.
                 </AppText>
+                <ActivityIndicator color={theme.primaryButton} style={styles.finishingSpinner} />
             </View>
         );
     }
@@ -190,6 +240,44 @@ export default function Step6Liveness({
                     Your identity check needs a manual look. We are creating your
                     account now and will notify you as soon as it clears.
                 </AppText>
+                <ActivityIndicator color={theme.primaryButton} style={styles.finishingSpinner} />
+            </View>
+        );
+    }
+
+    if (uiState === "unfinished" && failure) {
+        // Only a passing failure is worth sending again; the rest go to login.
+        const retry = failure.next === "retry" ? sent : null;
+        return (
+            <View style={[styles.resultContainer, { backgroundColor: theme.background }]}>
+                <MaterialCommunityIcons
+                    name="alert-circle-outline"
+                    size={64}
+                    color={theme.err}
+                />
+                <AppText
+                    variant="title"
+                    style={{ color: theme.text, textAlign: "center", marginTop: 20 }}>
+                    Couldn&apos;t finish signing up
+                </AppText>
+                <AppText
+                    variant="label1"
+                    style={{ color: theme.secondaryText, textAlign: "center", marginTop: 8, paddingHorizontal: 24 }}>
+                    {failure.message}
+                </AppText>
+                {retry ? (
+                    <AppButton
+                        title="Try again"
+                        onPress={() => void finish(retry.diditSessionId, retry.shown)}
+                        style={styles.primaryButton}
+                    />
+                ) : null}
+                <AppButton
+                    title="Back to login"
+                    variant={retry ? "secondary" : "primary"}
+                    onPress={backToLogin}
+                    style={retry ? styles.skipButton : styles.primaryButton}
+                />
             </View>
         );
     }
@@ -312,10 +400,7 @@ export default function Step6Liveness({
                         <AppButton
                             title="Skip liveness (dev)"
                             variant="secondary"
-                            onPress={() => {
-                                setUiState("done");
-                                onComplete(DEV_BYPASS_SESSION_ID);
-                            }}
+                            onPress={() => void finish(DEV_BYPASS_SESSION_ID, "done")}
                             style={styles.devButton}
                         />
                     )} */}
@@ -340,6 +425,9 @@ const styles = StyleSheet.create({
     },
     loadingText: {
         marginTop: 8,
+    },
+    finishingSpinner: {
+        marginTop: 24,
     },
     greenHeader: {
         paddingBottom: 32,

@@ -5,10 +5,11 @@ import Step2PhoneOTP from "@/components/signup/Step2PhoneOTP";
 import Step3Profile from "@/components/signup/Step3Profile";
 import Step4EmailOTP from "@/components/signup/Step4EmailOTP";
 import Step5CDL from "@/components/signup/Step5CDL";
-import Step6Liveness from "@/components/signup/Step6Liveness";
+import Step6Liveness, { type FinishResult } from "@/components/signup/Step6Liveness";
 import { toStoredDriver, useAuth } from "@/context/AuthContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
-import { authApi } from "@/lib/api";
+import { ApiError, authApi, type AuthTokens } from "@/lib/api";
+import { friendlyError } from "@/lib/loadApi";
 import { saveSession } from "@/lib/secureStore";
 import * as ImageManipulator from "expo-image-manipulator";
 import { useRouter } from "expo-router";
@@ -23,7 +24,53 @@ async function compressImage(uri: string): Promise<string> {
     );
     return result.uri;
 }
- 
+
+/*
+ * What the driver can do about a failed /register/complete, read from the
+ * server's answer. Sending the same request again only helps when the failure
+ * was passing (no signal, a server error); the others need another way on.
+ */
+function registrationFailure(err: unknown): FinishResult {
+    if (err instanceof ApiError) {
+        const body = err.body as
+            | { liveness_status?: string; errors?: Record<string, unknown> }
+            | undefined;
+
+        // Didit declined this session, so the same id would be refused every time.
+        if (err.status === 422 && body?.liveness_status === "declined") {
+            return {
+                ok: false,
+                next: "recheck",
+                message: "Your face check was not approved. Try it again, or skip it for now.",
+            };
+        }
+
+        // Most likely an earlier try created the account and its answer was lost.
+        if (err.status === 422 && body?.errors?.email) {
+            return {
+                ok: false,
+                next: "login",
+                message: "An account with this email already exists. Log in with your email and password.",
+            };
+        }
+
+        // The codes verified in the earlier steps have run out.
+        if (err.status === 403) {
+            return {
+                ok: false,
+                next: "login",
+                message: "Your sign-up timed out before it finished. Go back and tap Sign Up to start again.",
+            };
+        }
+    }
+
+    return {
+        ok: false,
+        next: "retry",
+        message: friendlyError(err, "Registration failed. Please try again."),
+    };
+}
+
 const TOTAL_STEPS = 5;
  
 interface SignupData {
@@ -74,10 +121,20 @@ export default function SignupScreen() {
         }
     };
  
-    const handleComplete = async (diditSessionId: string) => {
+    const handleComplete = async (diditSessionId: string): Promise<FinishResult> => {
+        let tokens: AuthTokens;
         try {
-            // 🚨 NEW: Get the OneSignal Device Token (Subscription ID)
-            const pushSubscriptionId = await OneSignal.User.pushSubscription.getIdAsync();
+            /*
+            | The OneSignal subscription, for pushes. Optional: without it the
+            | account is still created, so a OneSignal failure must never stop
+            | the driver registering.
+            */
+            let pushSubscriptionId: string | null = null;
+            try {
+                pushSubscriptionId = await OneSignal.User.pushSubscription.getIdAsync();
+            } catch (oneSignalErr) {
+                console.warn("Could not get OneSignal Token:", oneSignalErr);
+            }
 
             const formData = new FormData();
             formData.append("registration_token", data.registrationToken ?? "");
@@ -114,35 +171,47 @@ export default function SignupScreen() {
                 cdl_back: data.cdlBack?.uri ? "present" : "missing",
             });
 
-            const { data: tokens } = await authApi.completeRegistration(formData);
-            
-            // 🚨 NEW: Tell OneSignal to link this driver's backend ID to this phone!
-            OneSignal.login(tokens.driver.id.toString());
+            tokens = (await authApi.completeRegistration(formData)).data;
+        } catch (err: unknown) {
+            // Step 6 shows this with the way on that fits it; an alert left that screen stuck.
+            console.error("[Signup] Registration failed:", err);
+            return registrationFailure(err);
+        }
 
+        // The account exists from here on; a throw would hide that behind "Registration Error".
+        try {
+            OneSignal.login(tokens.driver.id.toString());
+        } catch (oneSignalErr) {
+            console.warn("[Signup] OneSignal login failed:", oneSignalErr);
+        }
+
+        // Not a failed registration either: the account is made, so the way on is login, never signing up again.
+        try {
             await saveSession(tokens.token, toStoredDriver(tokens.driver));
             await hydrateFromSession();
-
-            if (tokens.liveness_status === "in_review") {
-                Alert.alert(
-                    "Identity check under review",
-                    tokens.message ??
-                        "Your account is ready, but your identity check needs a manual look. We will notify you as soon as it clears.",
-                );
-            } else if (tokens.liveness_status === "skipped") {
-                Alert.alert(
-                    "Identity check skipped",
-                    tokens.message ??
-                        "Your account is ready. You can complete identity verification anytime from your profile.",
-                );
-            }
         } catch (err: unknown) {
-            console.error("[Signup] Registration failed:", err);
-            const message =
-                err instanceof Error
-                    ? err.message
-                    : "Registration failed. Please try again.";
-            Alert.alert("Registration Error", message);
+            console.error("[Signup] Signing in after registration failed:", err);
+            return {
+                ok: false,
+                next: "login",
+                message: "Your account is ready. Log in with your email and password.",
+            };
         }
+
+        if (tokens.liveness_status === "in_review") {
+            Alert.alert(
+                "Identity check under review",
+                tokens.message ??
+                    "Your account is ready, but your identity check needs a manual look. We will notify you as soon as it clears.",
+            );
+        } else if (tokens.liveness_status === "skipped") {
+            Alert.alert(
+                "Identity check skipped",
+                tokens.message ??
+                    "Your account is ready. You can complete identity verification anytime from your profile.",
+            );
+        }
+        return { ok: true };
     };
  
     return (

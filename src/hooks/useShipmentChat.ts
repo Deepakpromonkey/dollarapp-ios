@@ -1,5 +1,7 @@
 import { api } from "@/lib/api";
+import { friendlyError } from "@/lib/loadApi";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AppState } from "react-native";
 
 /**
  * The chat on one load.
@@ -50,9 +52,21 @@ interface ChatState {
 export function useShipmentChat(uuid: string | null | undefined): ChatState {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [shipmentNo, setShipmentNo] = useState<string | null>(null);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(() => !!uuid);
     const [sending, setSending] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
+    /*
+    | Another load's thread: start again from an empty, loading screen.
+    | Adjusted while rendering, so the effect below only has to fetch.
+    */
+    const thread = uuid || null;
+    const [shownThread, setShownThread] = useState(thread);
+    if (shownThread !== thread) {
+        setShownThread(thread);
+        setMessages([]);
+        setLoading(thread !== null);
+    }
 
     // Held in a ref as well as state so the poller reads the current cursor
     // without being torn down and recreated on every message.
@@ -72,52 +86,68 @@ export function useShipmentChat(uuid: string | null | undefined): ChatState {
         });
     }, []);
 
+    // A promise chain, so state is only ever set once the request has answered.
     const load = useCallback(
-        async (incremental: boolean) => {
-            if (!uuid) return;
+        (incremental: boolean): Promise<void> => {
+            if (!uuid) return Promise.resolve();
 
-            try {
-                const path = incremental && lastUuid.current
-                    ? `/shipments/${uuid}/messages?after=${lastUuid.current}`
-                    : `/shipments/${uuid}/messages`;
+            const path = incremental && lastUuid.current
+                ? `/shipments/${uuid}/messages?after=${lastUuid.current}`
+                : `/shipments/${uuid}/messages`;
 
-                const res = await api.get<ChatResponse>(path);
-                const payload = res.data?.data;
+            return api
+                .get<ChatResponse>(path)
+                .then((res) => {
+                    const payload = res.data?.data;
 
-                setShipmentNo(payload?.shipment?.shipment_no ?? null);
-                merge(payload?.messages ?? []);
-                setError(null);
-            } catch (err: unknown) {
-                // A failed poll is not worth an error banner over a thread the
-                // driver can already read — only the first load reports.
-                if (!incremental) {
-                    setError(
-                        err instanceof Error
-                            ? err.message
-                            : "Could not load the conversation",
-                    );
-                }
-            } finally {
-                setLoading(false);
-            }
+                    setShipmentNo(payload?.shipment?.shipment_no ?? null);
+                    merge(payload?.messages ?? []);
+                    setError(null);
+                })
+                .catch((err: unknown) => {
+                    // A failed poll is not worth an error banner over a thread the
+                    // driver can already read — only the first load reports.
+                    if (!incremental) {
+                        setError(friendlyError(err, "Could not load the conversation."));
+                    }
+                })
+                .finally(() => setLoading(false));
         },
         [uuid, merge],
     );
 
     useEffect(() => {
-        if (!uuid) {
-            setLoading(false);
-            return;
-        }
+        if (!uuid) return;
 
         lastUuid.current = null;
-        setMessages([]);
-        setLoading(true);
 
-        load(false);
+        void load(false);
 
-        const timer = setInterval(() => load(true), POLL_MS);
-        return () => clearInterval(timer);
+        /*
+        | Polled only while the app is on screen. A driver who leaves the app on
+        | this chat would otherwise keep asking every few seconds for as long as
+        | the phone lets the app run. Coming back asks straight away.
+        */
+        let timer: ReturnType<typeof setInterval> | null = setInterval(
+            () => load(true),
+            POLL_MS,
+        );
+
+        const subscription = AppState.addEventListener("change", (state) => {
+            if (state === "active") {
+                if (timer) return;
+                load(true);
+                timer = setInterval(() => load(true), POLL_MS);
+            } else if (timer) {
+                clearInterval(timer);
+                timer = null;
+            }
+        });
+
+        return () => {
+            subscription.remove();
+            if (timer) clearInterval(timer);
+        };
     }, [uuid, load]);
 
     const send = useCallback(
@@ -138,9 +168,7 @@ export function useShipmentChat(uuid: string | null | undefined): ChatState {
                 const saved = res.data?.data;
                 if (saved) merge([saved]);
             } catch (err: unknown) {
-                setError(
-                    err instanceof Error ? err.message : "Message not sent",
-                );
+                setError(friendlyError(err, "Message not sent."));
                 throw err;
             } finally {
                 setSending(false);

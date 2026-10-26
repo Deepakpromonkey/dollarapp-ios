@@ -106,7 +106,8 @@ export default function LoginScreen() {
                             style={[
                                 styles.errorBox,
                                 {
-                                    backgroundColor: theme.err + "20",
+                                    // A literal: theme.err is 8-digit hex, so appending an alpha gave an invalid colour.
+                                    backgroundColor: "#EF444420",
                                     borderColor: theme.err,
                                 },
                             ]}>
@@ -207,7 +208,7 @@ export default function LoginScreen() {
 
                     <View style={styles.signupRow}>
                         <AppText variant="label1" color="secondaryText">
-                            Don't have an account?{" "}
+                            Don&apos;t have an account?{" "}
                         </AppText>
                         <Link href={"/(auth)/signup" as any} asChild>
                             <Pressable hitSlop={8}>

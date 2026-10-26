@@ -199,7 +199,8 @@ export default function ForgotPasswordScreen() {
                             style={[
                                 styles.errorBox,
                                 {
-                                    backgroundColor: theme.err + "20",
+                                    // A literal: theme.err is 8-digit hex, so appending an alpha gave an invalid colour.
+                                    backgroundColor: "#EF444420",
                                     borderColor: theme.err,
                                 },
                             ]}>
@@ -220,7 +221,7 @@ export default function ForgotPasswordScreen() {
                                 variant="label1"
                                 color="secondaryText"
                                 style={styles.subtitle}>
-                                Enter your registered phone number. We'll send
+                                Enter your registered phone number. We&apos;ll send
                                 you a verification code.
                             </AppText>
 
@@ -311,7 +312,7 @@ export default function ForgotPasswordScreen() {
 
                             <View style={styles.resendRow}>
                                 <AppText variant="label1" color="secondaryText">
-                                    Didn't receive the code?{" "}
+                                    Didn&apos;t receive the code?{" "}
                                 </AppText>
                                 <Pressable
                                     onPress={handleResend}

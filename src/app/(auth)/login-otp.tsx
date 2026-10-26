@@ -153,7 +153,8 @@ export default function LoginOTPScreen() {
                             style={[
                                 styles.errorBox,
                                 {
-                                    backgroundColor: theme.err + "20",
+                                    // A literal: theme.err is 8-digit hex, so appending an alpha gave an invalid colour.
+                                    backgroundColor: "#EF444420",
                                     borderColor: theme.err,
                                 },
                             ]}>
@@ -177,7 +178,7 @@ export default function LoginOTPScreen() {
                                 variant="label1"
                                 color="secondaryText"
                                 style={styles.subtitle}>
-                                We'll send a one-time password to your mobile
+                                We&apos;ll send a one-time password to your mobile
                                 number.
                             </AppText>
 
@@ -288,7 +289,7 @@ export default function LoginOTPScreen() {
 
                             <View style={styles.resendRow}>
                                 <AppText variant="label1" color="secondaryText">
-                                    Didn't receive the code?{" "}
+                                    Didn&apos;t receive the code?{" "}
                                 </AppText>
                                 <Pressable
                                     onPress={handleResend}

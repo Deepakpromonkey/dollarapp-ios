@@ -3,7 +3,7 @@
     "name": "DollarTraq",
     "slug": "DollarTraq",
     "owner": "promonkey-dev",
-    "version": "1.5.0",
+    "version": "1.6.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "dollartraq",
@@ -18,7 +18,7 @@
           "location",
           "remote-notification"
         ],
-        "NSCameraUsageDescription": "DollarTraq uses the camera to capture trip verification photos.",
+        "NSCameraUsageDescription": "DollarTraq uses the camera to take trip, equipment and proof-of-delivery photos, and to verify your identity.",
         "NSPhotoLibraryUsageDescription": "DollarTraq needs access to your photo library to attach trip verification photos.",
         "NSPhotoLibraryAddUsageDescription": "DollarTraq needs permission to save photos to your library.",
         "ITSAppUsesNonExemptEncryption": false,
@@ -93,13 +93,13 @@
         "expo-image-picker",
         {
           "photosPermission": "DollarTraq needs access to your photo library to attach trip verification photos.",
-          "cameraPermission": "DollarTraq uses the camera to capture trip verification photos."
+          "cameraPermission": "DollarTraq uses the camera to take trip, equipment and proof-of-delivery photos, and to verify your identity."
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "DollarTraq uses the camera to capture trip verification photos.",
+          "cameraPermission": "DollarTraq uses the camera to take trip, equipment and proof-of-delivery photos, and to verify your identity.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }

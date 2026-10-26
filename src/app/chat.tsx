@@ -1,6 +1,7 @@
 import AppText from "@/components/AppText";
 import NavHeader from "@/components/NavHeader";
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { invalidate } from "@/lib/invalidate";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useEffect, useRef, useState } from "react";
 import { useLocalSearchParams } from "expo-router";
@@ -43,7 +44,18 @@ export default function ChatScreen() {
 
     const [input, setInput] = useState("");
     const scrollRef = useRef<ScrollView>(null);
-    const translateY = useRef(new Animated.Value(0)).current;
+    // Created once, like a ref, but readable while rendering.
+    const [translateY] = useState(() => new Animated.Value(0));
+
+    /*
+    | Opening the thread marks the broker's messages read on the server, so the
+    | unread count on the load and the bell are out of date once the driver
+    | leaves. Said on the way out, so the screen underneath shows the new count.
+    */
+    useEffect(() => {
+        if (!uuid) return;
+        return () => invalidate("shipments", "notifications");
+    }, [uuid]);
 
     useEffect(() => {
         const showEvent =
@@ -74,7 +86,7 @@ export default function ChatScreen() {
             showSub.remove();
             hideSub.remove();
         };
-    }, []);
+    }, [translateY]);
 
     const sendMessage = async () => {
         const trimmed = input.trim();

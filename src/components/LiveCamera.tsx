@@ -1,5 +1,6 @@
 import AppText from "@/components/AppText";
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { getPositionWithin } from "@/utils/currentPosition";
 import { CameraType, CameraView, useCameraPermissions } from "expo-camera";
 // import Constants from "expo-constants";
 import * as Location from "expo-location";
@@ -7,6 +8,7 @@ import * as Network from "expo-network";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
     ActivityIndicator,
+    AppState,
     Linking,
     Platform,
     Pressable,
@@ -67,7 +69,8 @@ function LiveCamera({
     const theme = useAppTheme();
     const insets = useSafeAreaInsets();
 
-    const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+    const [cameraPermission, requestCameraPermission, getCameraPermission] =
+        useCameraPermissions();
 
     /*
     | Go straight to the system prompt the first time, showing nothing of our
@@ -95,7 +98,43 @@ function LiveCamera({
 
     const [facing, setFacing] = useState<CameraType>("back");
     const [capturing, setCapturing] = useState(false);
+    /*
+    | The shutter waits for the camera to report itself open. A tap while it is
+    | still starting up goes to a camera that is not there and never answers.
+    */
+    const [cameraReady, setCameraReady] = useState(false);
+    /*
+    | A camera that never opens (no back camera, an unsupported device, a
+    | driver tapping before it bound) used to leave a black preview and a
+    | greyed shutter with no explanation. After a wait, or on a start error,
+    | the screen says so and offers to start the camera again.
+    */
+    const [startFailed, setStartFailed] = useState(false);
+    const [cameraAttempt, setCameraAttempt] = useState(0);
     const cameraRef = useRef<CameraView>(null);
+
+    // A shot finishing after this camera closed must not land anywhere.
+    const alive = useRef(true);
+    useEffect(() => {
+        alive.current = true;
+        return () => {
+            alive.current = false;
+        };
+    }, []);
+
+    // Only counts once the camera is allowed: before that the permission card is showing, not a camera.
+    const cameraAllowed = !!cameraPermission?.granted;
+    useEffect(() => {
+        if (!cameraAllowed || cameraReady || startFailed) return;
+        const timer = setTimeout(() => setStartFailed(true), 10_000);
+        return () => clearTimeout(timer);
+    }, [cameraAllowed, cameraReady, startFailed, cameraAttempt]);
+
+    const retryCamera = () => {
+        setStartFailed(false);
+        setCameraReady(false);
+        setCameraAttempt((n) => n + 1);
+    };
 
     const [locationText, setLocationText] = useState<string>("—");
     const [coordsText, setCoordsText] = useState<string>("");
@@ -103,45 +142,52 @@ function LiveCamera({
     // const [deviceIP] = useState<string>(getDeviceIP);
     const [deviceIP, setDeviceIP] = useState("Loading...");
 
-    const fetchDeviceIP = useCallback(async () => {
-        try {
-            const ip = await Network.getIpAddressAsync();
-            setDeviceIP(ip || "Unavailable");
-        } catch {
-            setDeviceIP("Unavailable");
-        }
-    }, []);
+    // Promise chains rather than await: state is only ever set once the lookups answer.
+    const fetchDeviceIP = useCallback(
+        () =>
+            Network.getIpAddressAsync()
+                .then((ip) => setDeviceIP(ip || "Unavailable"))
+                .catch(() => setDeviceIP("Unavailable")),
+        [],
+    );
 
-    const fetchLocation = useCallback(async () => {
-        if (accessLevel !== "full") return;
+    /*
+    | The location stamp only reads the permission, it never asks. The trip
+    | screen is the one place that asks for location; a second prompt from
+    | the camera used to queue up behind the trip screen's own.
+    */
+    const fetchLocation = useCallback(() => {
+        if (accessLevel !== "full") return Promise.resolve();
 
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== "granted") {
-            setLocationText("location denied");
-            return;
-        }
+        return Location.getForegroundPermissionsAsync()
+            .catch(() => null)
+            .then(async (permission) => {
+                if (!permission?.granted) {
+                    setLocationText("location off");
+                    return;
+                }
 
-        try {
-            const pos = await Location.getCurrentPositionAsync({
-                accuracy: Location.Accuracy.Balanced,
-            });
-            const { latitude, longitude } = pos.coords;
-            setCoordsText(`${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
+                const pos = await getPositionWithin(Location.Accuracy.Balanced);
+                if (!pos) {
+                    setLocationText("unavailable");
+                    return;
+                }
+                const { latitude, longitude } = pos.coords;
+                setCoordsText(`${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
 
-            const [place] = await Location.reverseGeocodeAsync({
-                latitude,
-                longitude,
-            });
-            if (place) {
-                const city = place.city ?? place.district ?? place.region ?? "";
-                const region = place.region ?? "";
-                setLocationText(
-                    [city, region].filter(Boolean).join(", ") || "unknown",
-                );
-            }
-        } catch {
-            setLocationText("unavailable");
-        }
+                const [place] = await Location.reverseGeocodeAsync({
+                    latitude,
+                    longitude,
+                });
+                if (place) {
+                    const city = place.city ?? place.district ?? place.region ?? "";
+                    const region = place.region ?? "";
+                    setLocationText(
+                        [city, region].filter(Boolean).join(", ") || "unknown",
+                    );
+                }
+            })
+            .catch(() => setLocationText("unavailable"));
     }, [accessLevel]);
 
     // useEffect(() => {
@@ -152,17 +198,42 @@ function LiveCamera({
         fetchDeviceIP();
     }, [fetchLocation, fetchDeviceIP]);
 
+    /*
+    | expo's permission hook reads the status once. A driver who enables the
+    | camera (or location) in Settings and comes back would otherwise still
+    | see the "blocked" card until this screen was opened again.
+    */
+    const needsLocation = !coordsText;
 
+    useEffect(() => {
+        const subscription = AppState.addEventListener("change", (next) => {
+            if (next !== "active") return;
+            getCameraPermission().catch(() => {});
+            if (needsLocation) fetchLocation();
+        });
+        return () => subscription.remove();
+    }, [getCameraPermission, fetchLocation, needsLocation]);
 
     const handleCapture = async () => {
-        if (!cameraRef.current || capturing) return;
+        if (!cameraRef.current || capturing || !cameraReady) return;
         try {
             setCapturing(true);
-            const photo = await cameraRef.current.takePictureAsync({
-                quality: 0.4,
-                skipProcessing: Platform.OS === "android",
-            });
+            /*
+            | A capture the camera never answers (it can happen while it is
+            | still binding) would otherwise leave the shutter greyed out until
+            | the camera was closed and reopened.
+            */
+            const photo = await Promise.race([
+                cameraRef.current.takePictureAsync({
+                    quality: 0.4,
+                    skipProcessing: Platform.OS === "android",
+                }),
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error("The camera did not respond")), 15_000),
+                ),
+            ]);
             if (photo?.uri) {
+                if (!alive.current) return;
                 onCapture?.({
                     uri: photo.uri,
                     ip: deviceIP,
@@ -301,9 +372,18 @@ function LiveCamera({
     return (
         <SafeAreaView style={[styles.container, style]}>
             <CameraView
+                key={cameraAttempt}
                 ref={cameraRef}
                 style={StyleSheet.absoluteFill}
                 facing={facing}
+                onCameraReady={() => {
+                    setCameraReady(true);
+                    setStartFailed(false);
+                }}
+                onMountError={(event) => {
+                    console.warn("[LiveCamera] camera could not start:", event?.message);
+                    setStartFailed(true);
+                }}
             />
 
             {onClose && (
@@ -347,6 +427,22 @@ function LiveCamera({
                 )}
             </View>
 
+            {startFailed && !cameraReady && (
+                <View style={styles.startFailed}>
+                    <AppText variant="label1" style={styles.startFailedTitle}>
+                        Camera couldn&apos;t start
+                    </AppText>
+                    <AppText variant="caption" style={styles.startFailedBody}>
+                        Try again{showFlip ? ", or flip to the other camera" : ""}.
+                    </AppText>
+                    <Pressable onPress={retryCamera} hitSlop={8} style={styles.startFailedButton}>
+                        <AppText variant="label1" style={styles.startFailedButtonText}>
+                            Try again
+                        </AppText>
+                    </Pressable>
+                </View>
+            )}
+
             <View style={styles.controls}>
                 {showFlip && (
                     <Pressable
@@ -363,10 +459,10 @@ function LiveCamera({
                 {showCapture && (
                     <Pressable
                         onPress={handleCapture}
-                        disabled={capturing}
+                        disabled={capturing || !cameraReady}
                         style={[
                             styles.shutterOuter,
-                            capturing && styles.shutterDisabled,
+                            (capturing || !cameraReady) && styles.shutterDisabled,
                         ]}
                         accessibilityLabel="Take photo">
                         <View style={styles.shutterInner} />
@@ -383,6 +479,27 @@ const OVERLAY_BG = "rgba(0,0,0,0.55)";
 const OVERLAY_TEXT = "#FFFFFF";
 
 const styles = StyleSheet.create({
+    startFailed: {
+        position: "absolute",
+        left: 24,
+        right: 24,
+        top: "35%",
+        alignItems: "center",
+        gap: 8,
+        padding: 16,
+        borderRadius: 14,
+        backgroundColor: "rgba(0,0,0,0.7)",
+    },
+    startFailedTitle: { color: "#FFFFFF", fontWeight: "700" },
+    startFailedBody: { color: "#E5E7EB", textAlign: "center" },
+    startFailedButton: {
+        marginTop: 4,
+        paddingHorizontal: 18,
+        paddingVertical: 8,
+        borderRadius: 20,
+        backgroundColor: "#FFFFFF",
+    },
+    startFailedButtonText: { color: "#111827", fontWeight: "700" },
     container: {
         flex: 1,
         overflow: "hidden",

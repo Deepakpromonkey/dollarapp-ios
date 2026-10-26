@@ -1,5 +1,7 @@
 import * as SecureStore from "expo-secure-store";
 
+import type { LivenessStatus } from "./api";
+
 export const KEYS = {
     ACCESS_TOKEN: "dt_access_token",
     DRIVER: "dt_driver",
@@ -24,7 +26,7 @@ export interface StoredDriver {
     carrier_name: string | null;
     phone_verified: boolean;
     liveness_verified: boolean;
-    liveness_status: "approved" | "in_review" | "declined" | "pending" | "skipped";
+    liveness_status: LivenessStatus;
     status: string;
 }
 
@@ -50,6 +52,17 @@ export async function saveSession(
         setItem(KEYS.ACCESS_TOKEN, accessToken),
         setItem(KEYS.DRIVER, JSON.stringify(driver)),
     ]);
+}
+
+/*
+| Replace the cached driver without touching the token.
+|
+| The cached copy was only ever written at login and signup, so anything that
+| changed afterwards (an identity check finishing, say) stayed wrong on this
+| phone until the driver logged in again.
+*/
+export async function saveDriver(driver: StoredDriver): Promise<void> {
+    await setItem(KEYS.DRIVER, JSON.stringify(driver));
 }
 
 export async function getAccessToken(): Promise<string | null> {

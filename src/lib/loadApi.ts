@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import type { StopEvent } from "@/types/shipment";
 
 /**
@@ -6,10 +6,30 @@ import type { StopEvent } from "@/types/shipment";
  * at each stop, and getting a dock to confirm loading and delivery.
  */
 
-interface Envelope<T> {
+export interface Envelope<T> {
     status: boolean;
     message: string;
     data: T;
+}
+
+/*
+| What to tell the driver when a request fails.
+|
+| A dropped signal or a server crash reaches the app as "Network Error",
+| "timeout of 15000ms exceeded" or "Server Error", which mean nothing to
+| someone in a truck cab. Anything the API itself explained (a 4xx with a
+| message) is passed through as written.
+*/
+export function friendlyError(err: unknown, fallback: string): string {
+    if (err instanceof ApiError) {
+        if (err.status === 0) {
+            return "Can't reach DollarTraq. Check your signal and try again.";
+        }
+        if (err.status >= 500) {
+            return "Something went wrong on our side. Try again in a minute.";
+        }
+    }
+    return err instanceof Error && err.message ? err.message : fallback;
 }
 
 export interface StopEventsPayload {

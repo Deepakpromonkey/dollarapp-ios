@@ -1,5 +1,8 @@
+import { Fonts } from "@/constants/fonts";
+import { useNotifications } from "@/context/NotificationsContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { router, type Href } from "expo-router";
 import { ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import AppText from "./AppText";
@@ -13,8 +16,10 @@ interface LoadHeaderProps {
 
     onMenuPress?: () => void;
 
+    /** Defaults to opening the notification inbox. */
     onNotificationPress?: () => void;
 
+    /** Defaults to the driver's unread count. */
     notificationCount?: number;
 
     right?: ReactNode;
@@ -26,7 +31,7 @@ export default function LoadHeader({
     liveLabel = "LIVE",
     onMenuPress,
     onNotificationPress,
-    notificationCount = 0,
+    notificationCount,
     right,
 }: LoadHeaderProps) {
     const theme = useAppTheme();
@@ -77,20 +82,67 @@ export default function LoadHeader({
             </View>
 
             <View style={styles.rightSlot}>
-                <Pressable
+                <NotificationBell
                     onPress={onNotificationPress}
-                    hitSlop={10}
-                    style={[styles.iconBtn, { backgroundColor: iconBg }]}>
-                    <MaterialCommunityIcons
-                        name="bell-outline"
-                        size={20}
-                        color={iconColor}
-                    />
-                    {notificationCount > 0 && <View style={styles.badge} />}
-                </Pressable>
+                    count={notificationCount}
+                    iconSize={20}
+                    iconColor={iconColor}
+                    backgroundColor={iconBg}
+                />
                 {right}
             </View>
         </View>
+    );
+}
+
+interface NotificationBellProps {
+    onPress?: () => void;
+    count?: number;
+    iconSize: number;
+    iconColor: string;
+    backgroundColor: string;
+}
+
+/* Not in the generated route types until the dev server regenerates them. */
+const INBOX = "/notifications" as Href;
+
+/**
+ * The header bell: opens the inbox and shows how many notifications are
+ * unread. Shared by LoadHeader and AppHeader so every screen's bell behaves
+ * the same.
+ */
+export function NotificationBell({
+    onPress,
+    count,
+    iconSize,
+    iconColor,
+    backgroundColor,
+}: NotificationBellProps) {
+    const { unreadCount } = useNotifications();
+    const shown = count ?? unreadCount;
+
+    return (
+        <Pressable
+            onPress={onPress ?? (() => router.push(INBOX))}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel={
+                shown > 0 ? `Notifications, ${shown} unread` : "Notifications"
+            }
+            style={[styles.iconBtn, { backgroundColor }]}>
+            <MaterialCommunityIcons
+                name="bell-outline"
+                size={iconSize}
+                color={iconColor}
+            />
+            {shown > 0 && (
+                <View style={[styles.badge, { borderColor: backgroundColor }]}>
+                    <AppText style={styles.badgeText}>
+                        {shown > 99 ? "99+" : String(shown)}
+                    </AppText>
+                </View>
+            )}
+        </Pressable>
     );
 }
 
@@ -147,11 +199,22 @@ const styles = StyleSheet.create({
     },
     badge: {
         position: "absolute",
-        top: 8,
-        right: 8,
-        width: 8,
-        height: 8,
-        borderRadius: 4,
+        top: 2,
+        right: 2,
+        minWidth: 18,
+        height: 18,
+        paddingHorizontal: 4,
+        borderRadius: 9,
+        borderWidth: 1.5,
         backgroundColor: "#EF4444",
+        justifyContent: "center",
+        alignItems: "center",
+    },
+    badgeText: {
+        color: "#FFFFFF",
+        fontFamily: Fonts.bold,
+        fontSize: 10,
+        lineHeight: 13,
+        includeFontPadding: false,
     },
 });

@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
+import { onInvalidate } from "@/lib/invalidate";
 import type { StopEvent } from "@/types/shipment";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * The journey as a list of stops rather than five fixed steps.
@@ -32,6 +33,11 @@ export interface StopProgress {
     longitude: string | null;
     contact_name: string | null;
     comment_to_driver: string | null;
+
+    /** Whether the dock must give the driver a code before this stop can be completed. */
+    requires_otp: boolean;
+    /** The appointment as an exact instant (ISO 8601 with offset), or null when unknown. */
+    appointment_at?: string | null;
 
     is_final: boolean;
     otp_purpose: "load" | "delivery";
@@ -69,76 +75,162 @@ interface ProgressState {
     isActivated: boolean;
     equipmentVerified: boolean;
     isComplete: boolean;
+    /** True while this load's progress is being fetched, the first time or again. */
     loading: boolean;
     error: string | null;
-    refresh: () => void;
+    /** Fetch again. Resolves once that fetch has settled; never rejects. */
+    refresh: () => Promise<void>;
     /** Adopts the stop list an action returned, saving a round trip. */
     apply: (stops: StopProgress[]) => void;
 }
 
+interface ProgressFacts {
+    /** The load these facts belong to. */
+    uuid: string | null;
+    stops: StopProgress[];
+    currentStopId: number | null;
+    isActivated: boolean;
+    equipmentVerified: boolean;
+}
+
+const EMPTY: Omit<ProgressFacts, "uuid"> = {
+    stops: [],
+    currentStopId: null,
+    isActivated: false,
+    equipmentVerified: false,
+};
+
 export function useStopProgress(uuid: string | null | undefined): ProgressState {
-    const [stops, setStops] = useState<StopProgress[]>([]);
-    const [currentStopId, setCurrentStopId] = useState<number | null>(null);
-    const [isActivated, setIsActivated] = useState(false);
-    const [equipmentVerified, setEquipmentVerified] = useState(false);
-    const [loading, setLoading] = useState(false);
+    const key = uuid || null;
+
+    const [facts, setFacts] = useState<ProgressFacts>({ uuid: null, ...EMPTY });
+    const [inFlight, setInFlight] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [tick, setTick] = useState(0);
 
-    const refresh = useCallback(() => setTick((t) => t + 1), []);
+    /*
+    | A different load: the spinner and error belong to it, not the last one.
+    | Adjusted while rendering, so the fetch effect below only has to start the
+    | request and never sets state before it settles.
+    */
+    const [shownKey, setShownKey] = useState(key);
+    if (shownKey !== key) {
+        setShownKey(key);
+        setInFlight(key !== null);
+        setError(null);
+        if (key === null) setFacts({ uuid: null, ...EMPTY });
+    }
 
-    const apply = useCallback((next: StopProgress[]) => {
-        setStops(next);
-        setCurrentStopId(next.find((s) => s.is_current)?.stop_id ?? null);
-    }, []);
+    /*
+    | Every fetch takes a number and only the newest may write, so a fetch for
+    | a load the screen has left, or one overtaken by a refresh, cannot land
+    | its stops (and their ids, which the action buttons post) on another load.
+    | The newest fetch also owns the spinner, so loading always settles.
+    */
+    const requestId = useRef(0);
+
+    /* The request itself: state changes only once it settles, and only for the newest. */
+    const fetchProgress = useCallback(async (id: number): Promise<void> => {
+        if (!key) return;
+
+        try {
+            const res = await api.get<ProgressResponse>(`/shipments/${key}/progress`);
+            if (id !== requestId.current) return;
+
+            const data = res.data?.data;
+            setFacts({
+                uuid: key,
+                stops: data?.stops ?? [],
+                currentStopId: data?.current_stop_id ?? null,
+                isActivated: !!data?.is_activated,
+                equipmentVerified: !!data?.is_equipment_verified,
+            });
+        } catch (err: unknown) {
+            if (id !== requestId.current) return;
+            setError(err instanceof Error ? err.message : "Could not load the journey");
+            // Keep what this load already showed; a different load's stops never carry over.
+            setFacts((prev) => (prev.uuid === key ? prev : { uuid: key, ...EMPTY }));
+        } finally {
+            if (id === requestId.current) setInFlight(false);
+        }
+    }, [key]);
+
+    const load = useCallback(async (): Promise<void> => {
+        const id = ++requestId.current;
+
+        if (!key) {
+            setFacts({ uuid: null, ...EMPTY });
+            setInFlight(false);
+            setError(null);
+            return;
+        }
+
+        setInFlight(true);
+        setError(null);
+        await fetchProgress(id);
+    }, [key, fetchProgress]);
 
     useEffect(() => {
-        if (!uuid) return;
-
-        let cancelled = false;
-
-        (async () => {
-            setLoading(true);
-            setError(null);
-            try {
-                const res = await api.get<ProgressResponse>(
-                    `/shipments/${uuid}/progress`,
-                );
-                if (cancelled) return;
-
-                const data = res.data?.data;
-                setStops(data?.stops ?? []);
-                setCurrentStopId(data?.current_stop_id ?? null);
-                setIsActivated(!!data?.is_activated);
-                setEquipmentVerified(!!data?.is_equipment_verified);
-            } catch (err: unknown) {
-                if (cancelled) return;
-                setError(
-                    err instanceof Error ? err.message : "Could not load the journey",
-                );
-            } finally {
-                if (!cancelled) setLoading(false);
-            }
-        })();
-
+        const ids = requestId;
+        void fetchProgress(++ids.current);
         return () => {
-            cancelled = true;
+            // Leaving this load (or the screen): whatever is in flight for it may not write.
+            ids.current++;
         };
-    }, [uuid, tick]);
+    }, [fetchProgress]);
+
+    const apply = useCallback(
+        (next: StopProgress[]) => {
+            if (!key) return;
+            /*
+            | The action's answer is newer than any fetch still in flight, which
+            | may have been sent before the action and would put the stop back.
+            */
+            requestId.current++;
+            setInFlight(false);
+            setFacts((prev) => ({
+                ...(prev.uuid === key ? prev : { ...EMPTY }),
+                uuid: key,
+                stops: next,
+                currentStopId: next.find((s) => s.is_current)?.stop_id ?? null,
+            }));
+        },
+        [key],
+    );
+
+    // Re-subscribed per load, so each listener works on the load being shown.
+    useEffect(() => {
+        const offTrip = onInvalidate("trip", () => {
+            load();
+        });
+        const offSession = onInvalidate("session", () => {
+            requestId.current++;
+            setFacts({ uuid: key, ...EMPTY });
+            setInFlight(false);
+            setError(null);
+        });
+        return () => {
+            offTrip();
+            offSession();
+        };
+    }, [load, key]);
+
+    // Read against the load being asked about, so the previous load's stops never show for the next.
+    const fresh = facts.uuid === key;
+    const view = fresh ? facts : EMPTY;
 
     return {
-        stops,
-        currentStopId,
-        currentStop: stops.find((s) => s.stop_id === currentStopId) ?? null,
-        isActivated,
-        equipmentVerified,
+        stops: view.stops,
+        currentStopId: view.currentStopId,
+        currentStop: view.stops.find((s) => s.stop_id === view.currentStopId) ?? null,
+        isActivated: view.isActivated,
+        equipmentVerified: view.equipmentVerified,
 
         // No current stop on a load that has stops means every one is behind us.
-        isComplete: stops.length > 0 && currentStopId === null,
+        isComplete: view.stops.length > 0 && view.currentStopId === null,
 
-        loading,
-        error,
-        refresh,
+        loading: key ? !fresh || inFlight : false,
+        error: fresh ? error : null,
+        refresh: load,
         apply,
     };
 }

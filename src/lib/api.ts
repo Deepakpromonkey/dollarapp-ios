@@ -8,9 +8,8 @@ import axios, {
 
 import { clearSession, getAccessToken } from "./secureStore";
 
- 
+
 export const BASE_URL = "https://driverapi.dollartraq.com/api";
-// export const BASE_URL = "https://mobility-twitter-tameness.ngrok-free.dev/api";
 
 export class ApiError extends Error {
   constructor(
@@ -56,6 +55,23 @@ interface AppRequestConfig extends AxiosRequestConfig {
   skipAuth?: boolean;
 }
 
+/*
+| What to do when the server stops accepting this phone's session.
+|
+| A token is revoked when the driver logs in on another phone or asks for the
+| account to be deleted, and every request still carrying it then gets a 401.
+| Clearing the stored token here was all that happened before, so the signed-in
+| screens stayed up with every request failing until the app was restarted.
+| AuthContext registers a handler that signs the driver out properly.
+*/
+type UnauthorizedHandler = () => void;
+
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler;
+}
+
 const axiosInstance: AxiosInstance = axios.create({
   baseURL: BASE_URL,
   timeout: 15000,
@@ -85,11 +101,33 @@ axiosInstance.interceptors.request.use(
 axiosInstance.interceptors.response.use(
   (response: AxiosResponse) => response,
   async (error: AxiosError) => {
-    const originalRequest = error.config as AppRequestConfig &
-      InternalAxiosRequestConfig;
+    const originalRequest = error.config as
+      | (AppRequestConfig & InternalAxiosRequestConfig)
+      | undefined;
 
-    if (error.response?.status === 401 && !originalRequest.skipAuth) {
-      await clearSession();
+    if (error.response?.status === 401 && !originalRequest?.skipAuth) {
+      /*
+      | Only the session that sent the request is over. A reply that lands after
+      | the driver has already signed out and back in carries the old token, and
+      | must not wipe the new one.
+      */
+      const headers = originalRequest?.headers;
+      const sentAuth =
+        typeof headers?.get === "function"
+          ? headers.get("Authorization")
+          : headers?.["Authorization"];
+      const sentToken = String(sentAuth ?? "").replace(/^Bearer\s+/i, "");
+      const currentToken = (await getAccessToken().catch(() => null)) ?? "";
+
+      if (sentToken === currentToken) {
+        await clearSession().catch(() => {});
+        try {
+          unauthorizedHandler?.();
+        } catch (err) {
+          console.warn("[api] Unauthorized handler failed:", err);
+        }
+      }
+
       return Promise.reject(
         new ApiError(401, "Session expired — please log in again"),
       );
@@ -146,10 +184,15 @@ export const api = {
 
       console.log("=== API.UPLOAD TRIGGERED ===");
       console.log("Target URL:", url);
-      console.log("FormData Parts:", JSON.stringify((formData as any)._parts));
       console.log("============================");
 
       const response = await axiosInstance.post<T>(path, formData, {
+        /*
+        | Photos over a weak signal need longer than the 15 s that suits
+        | ordinary requests. Cut off at 15 s, a delivery photo the server had
+        | in fact received came back as "Network Error".
+        */
+        timeout: 120_000,
         ...config,
         headers: {
           ...(config?.headers ?? {}),
@@ -192,6 +235,19 @@ export interface OtpLoginPayload {
   otp: string;
   device_token?: string | null;
 }
+
+/*
+ * app_drivers.liveness_status as the API stores it. The broker's control tower
+ * reads the same column, so these are the only values there are: "pending" is
+ * the column default on older rows and "skipped" a driver who chose to verify
+ * later. Use utils/liveness resolveLiveness to turn it into what the app shows.
+ */
+export type LivenessStatus =
+  | "approved"
+  | "in_review"
+  | "declined"
+  | "pending"
+  | "skipped";
 /*
  * Mirrors DriverResource on the API. This used to describe the broker API's
  * `drivers` table — row_id, active_plan, lifetime_loads, roles and a dozen more
@@ -214,7 +270,7 @@ export interface Driver {
   phone_verified: boolean;
   email_verified_at: string | null;
   liveness_verified: boolean;
-  liveness_status: "approved" | "in_review" | "declined" | "pending" | "skipped";
+  liveness_status: LivenessStatus;
   cdl_number: string | null;
   cdl_state: string | null;
   cdl_expiration: string | null;
@@ -230,6 +286,11 @@ export interface LoginResponse {
   message: string;
   token: string;
   driver: Driver;
+  /*
+   * True when this login cancelled a pending account deletion. Logging in is
+   * how a driver keeps an account they asked to delete, so the app tells them.
+   */
+  deletion_cancelled?: boolean;
 }
 export interface AuthTokens {
   token: string;
@@ -241,7 +302,7 @@ export interface AuthTokens {
    * has not decided the identity check yet — the verdict reaches the backend by
    * webhook, not by anything the app can wait on here.
    */
-  liveness_status?: "approved" | "in_review" | "declined" | "skipped";
+  liveness_status?: Exclude<LivenessStatus, "pending">;
   message?: string;
 }
 export interface SignupPayload {
@@ -290,6 +351,13 @@ export interface DriverProfile {
   zip: string | null;
   created_at: string;
   updated_at: string;
+  /*
+   * Added to GET /driver/profile later, so an older API build leaves them out.
+   * GET /driver/complete-profile has carried the liveness pair all along.
+   */
+  liveness_verified?: boolean;
+  liveness_status?: LivenessStatus | null;
+  carrier_name?: string | null;
 }
 export interface DriverProfileResponse {
   status: boolean;
@@ -309,14 +377,66 @@ export interface VerifiedEquipment {
   status: string;
   created_at: string;
   updated_at: string;
-  shipment: { id: number; uuid: string; shipment_no: string };
+  shipment: {
+    id: number;
+    uuid: string;
+    shipment_no: string;
+    /* Sent by newer API builds so the screen can match the photos to the load's units. */
+    pro_number?: string | null;
+    truck_number?: string | null;
+    trailer_number?: string | null;
+  } | null;
 }
 export interface CompleteProfileResponse {
   status: string;
   message: string;
   data: {
-    driver_profile: DriverProfile;
+    driver_profile: DriverProfile & {
+      /* Storage paths, from API builds that predate the ready-made image URLs. */
+      cdl_front_path?: string | null;
+      cdl_back_path?: string | null;
+    };
     verified_equipment_history: VerifiedEquipment[];
+  };
+}
+
+/** POST /driver/liveness/session, same shape as the signup one. */
+export interface LivenessSessionResponse {
+  status: string;
+  message?: string;
+  didit_session_id: string;
+  session_token: string | null;
+  session_url: string | null;
+}
+
+/** POST /driver/liveness/refresh: the verdict Didit holds for the driver's session now. */
+export interface LivenessRefreshResponse {
+  status: string;
+  message?: string;
+  liveness_status: LivenessStatus;
+  liveness_verified: boolean;
+  driver?: Driver;
+  /*
+   * Didit's own status for that session ("In Progress", "Abandoned", ...),
+   * when the API sends it. liveness_status alone cannot tell a check Didit is
+   * still working on from one it gave up on: both leave it skipped or pending.
+   */
+  didit_status?: string | null;
+}
+
+export interface AccountDeletionResponse {
+  status: boolean;
+  message: string;
+  data: {
+    /** ISO 8601. The account is purged after this unless the driver logs in. */
+    deletion_scheduled_for: string;
+    grace_days: number;
+    /*
+     * The "log in before" date as the email states it ("28 Oct 2026"), worked
+     * out so it is never later than the purge in any driver's own time zone.
+     * Older API builds leave it out.
+     */
+    deletion_date?: string;
   };
 }
 
@@ -329,6 +449,25 @@ export const driverApi = {
       "/driver/profile-picture",
       formData,
     ),
+  /*
+   * Identity check after signup, for drivers who skipped it or were declined.
+   * Answers 409 with a message when the driver is already verified or under
+   * review.
+   */
+  startLiveness: () =>
+    api.post<LivenessSessionResponse>("/driver/liveness/session"),
+  refreshLiveness: () =>
+    api.post<LivenessRefreshResponse>("/driver/liveness/refresh"),
+  /*
+   * Schedules the account for deletion and signs the driver out on every
+   * phone: the token sent with this request stops working as soon as it
+   * succeeds.
+   */
+  requestAccountDeletion: (reason?: string) =>
+    api.post<AccountDeletionResponse>("/driver/account/delete", {
+      confirm: true,
+      ...(reason?.trim() ? { reason: reason.trim().slice(0, 500) } : {}),
+    }),
 } as const;
 
 export const authApi = {
@@ -373,12 +512,7 @@ export const authApi = {
       { skipAuth: true },
     ),
   livenessSession: (registration_token: string) =>
-    api.post<{
-      status: string;
-      didit_session_id: string;
-      session_token: string | null;
-      session_url: string | null;
-    }>(
+    api.post<LivenessSessionResponse>(
       "/register/liveness-session",
       { registration_token },
       { skipAuth: true },

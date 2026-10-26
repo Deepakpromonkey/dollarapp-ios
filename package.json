@@ -1,6 +1,6 @@
 {
   "name": "dollartraq",
-  "main": "expo-router/entry",
+  "main": "index.ts",
   "version": "1.0.0",
   "dependencies": {
     "@didit-protocol/sdk-react-native": "^4.1.0",

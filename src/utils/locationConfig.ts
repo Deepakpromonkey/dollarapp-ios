@@ -171,12 +171,16 @@ export interface AuthedPostResult {
  * status comes back as `ok: false` so callers can tell "the server said no"
  * apart from "the server was never reached" and treat the queue accordingly.
  */
-export async function authedPost(url: string, payload: unknown): Promise<AuthedPostResult> {
+export async function authedPost(
+  url: string,
+  payload: unknown,
+  { timeoutMs = REQUEST_TIMEOUT_MS }: { timeoutMs?: number } = {},
+): Promise<AuthedPostResult> {
   const token = await getAccessToken();
   if (!token) throw new Error("No access token");
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, {

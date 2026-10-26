@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Linking, Platform } from "react-native";
 import * as Location from "expo-location";
 
@@ -36,35 +36,54 @@ export interface UseLocationHealth {
  * train them to dismiss the warning that matters.
  */
 export function useLocationHealth(activeShipmentUuid?: string | null): UseLocationHealth {
-  const [snapshot, setSnapshot] = useState<LocationHealthSnapshot | null>(null);
+  const key = activeShipmentUuid || null;
+
+  // Each reading remembers the load it was taken for; a new load starts with none.
+  const [reading, setReading] = useState<{
+    key: string;
+    snapshot: LocationHealthSnapshot;
+  } | null>(null);
+
+  /*
+  | The monitor, its foreground listener and a button press can all be
+  | checking at once. A reading older than the one on screen is dropped (by
+  | when the check started), so a check that finishes late cannot put a fixed
+  | problem back on screen.
+  */
+  const lastCheckedAt = useRef(0);
+
+  const accept = useCallback((forKey: string, next: LocationHealthSnapshot) => {
+    if (next.checkedAt < lastCheckedAt.current) return;
+    lastCheckedAt.current = next.checkedAt;
+    setReading({ key: forKey, snapshot: next });
+  }, []);
 
   useEffect(() => {
-    if (!activeShipmentUuid) return;
+    if (!key) return;
 
     /*
     | Notifications are deliberately NOT suppressed here even though this screen
-    | shows its own banner. A driver with an active load and location switched
-    | off gets alerted every five minutes until they fix it, and a banner they
-    | have already scrolled past is not an alert. Suppressing while the app was
-    | open meant the notification only ever fired on app launch, which is the
-    | one moment the driver is already looking at the banner.
+    | shows its own banner: the driver is told once when tracking stops working,
+    | and a banner they have already scrolled past is not that. Suppressing while
+    | the app was open meant the notification only ever fired on app launch,
+    | which is the one moment the driver is already looking at the banner.
     */
-    const stop = startLocationHealthMonitor({ onSnapshot: setSnapshot });
-
-    return stop;
-  }, [activeShipmentUuid]);
+    return startLocationHealthMonitor({ onSnapshot: (next) => accept(key, next) });
+  }, [key, accept]);
 
   /*
   | Derived rather than cleared in the effect: clearing there is a cascading
-  | render, and leaving the last reading in place would keep a warning on screen
-  | about a load that has already been delivered.
+  | render, leaving the last reading in place would keep a warning on screen
+  | about a load that has already been delivered, and a reading taken for the
+  | previous load is not trusted for the next one.
   */
-  const current = activeShipmentUuid ? snapshot : null;
+  const current = reading && reading.key === key ? reading.snapshot : null;
 
   const refresh = useCallback(async () => {
-    const next = await syncLocationHealth(activeShipmentUuid ?? null, { silent: true });
-    setSnapshot(next);
-  }, [activeShipmentUuid]);
+    if (!key) return;
+    const next = await syncLocationHealth(key, { silent: true });
+    accept(key, next);
+  }, [key, accept]);
 
   const state = current?.state ?? "unknown";
 
